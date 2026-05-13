@@ -1,0 +1,82 @@
+{
+  "name": "opencodego-vscode",
+  "displayName": "OpenCode Go BYOK Provider",
+  "description": "Adds OpenCode Go models to VS Code and GitHub Copilot Chat through the Language Model Chat Provider API.",
+  "version": "0.0.1",
+  "publisher": "local-dev",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.118.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:opencodego.manage",
+    "onCommand:opencodego.diagnostics",
+    "onCommand:opencodego.setApiKey",
+    "onLanguageModelChatProvider:opencodego"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "opencodego.manage",
+        "title": "OpenCode Go: Manage Provider"
+      },
+      {
+        "command": "opencodego.setApiKey",
+        "title": "OpenCode Go: Set API Key"
+      },
+      {
+        "command": "opencodego.diagnostics",
+        "title": "OpenCode Go: Diagnostics"
+      }
+    ],
+    "configuration": {
+      "title": "OpenCode Go",
+      "properties": {
+        "opencodego.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature used for chat completions."
+        },
+        "opencodego.maxTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Optional max output token override. Use 0 to request each OpenCode Go model's configured maximum."
+        },
+        "opencodego.maxInputTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Optional context size override advertised to VS Code. Use 0 to advertise each OpenCode Go model's configured context window."
+        }
+      }
+    },
+    "languageModelChatProviders": [
+      {
+        "vendor": "opencodego",
+        "displayName": "OpenCode Go",
+        "managementCommand": "opencodego.manage"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/vscode": "^1.118.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.9.3"
+  }
+}
