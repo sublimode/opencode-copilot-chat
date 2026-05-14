@@ -66,17 +66,27 @@ type ConfiguredLanguageModelResponseOptions = vscode.ProvideLanguageModelChatRes
   configuration?: LanguageModelConfiguration;
 };
 
-interface ModelLimits {
+interface BaseModelLimits {
   contextWindow: number;
   maxOutputTokens: number;
 }
 
-const DEFAULT_MODEL_LIMITS: ModelLimits = {
+interface ModelLimits extends BaseModelLimits {
+  advertisedContextWindow: number;
+  advertisedMaxInputTokens: number;
+  advertisedMaxOutputTokens: number;
+}
+
+// Copilot surfaces combine input/output metadata differently across views.
+// Reserve a modest UI output budget, while requests still use the real model max.
+const UI_OUTPUT_TOKEN_RESERVE = 8192;
+
+const DEFAULT_MODEL_LIMITS: BaseModelLimits = {
   contextWindow: 262144,
   maxOutputTokens: 65536
 };
 
-const MODEL_LIMITS: Record<string, ModelLimits> = {
+const MODEL_LIMITS: Record<string, BaseModelLimits> = {
   "deepseek-v4-flash": { contextWindow: 1000000, maxOutputTokens: 384000 },
   "deepseek-v4-pro": { contextWindow: 1000000, maxOutputTokens: 384000 },
   "mimo-v2.5": { contextWindow: 1000000, maxOutputTokens: 128000 },
@@ -260,16 +270,21 @@ class OpenCodeGoProvider implements vscode.LanguageModelChatProvider<OpenCodeGoM
 
   async showDiagnostics(): Promise<void> {
     const models = await vscode.lm.selectChatModels({ vendor: VENDOR });
-    const lines = models.map((model) => [
+    const lines = models.map((model) => {
+      const limits = modelLimits(model.id);
+      return [
       `- ${model.id}`,
       `  name: ${model.name}`,
       `  family: ${model.family}`,
       `  vendor: ${model.vendor}`,
       `  version: ${model.version}`,
       `  maxInputTokens: ${model.maxInputTokens}`,
-      `  maxOutputTokens: ${modelLimits(model.id).maxOutputTokens}`,
+      `  advertisedMaxOutputTokens: ${limits.advertisedMaxOutputTokens}`,
+      `  advertisedContextWindow: ${limits.advertisedContextWindow}`,
+      `  apiMaxOutputTokens: ${limits.maxOutputTokens}`,
       ...(MODEL_LIMITS[model.id] ? [] : ["  limits: using default fallback"])
-    ].join("\n"));
+      ].join("\n");
+    });
 
     const content = [
       "# OpenCode Go Diagnostics",
@@ -316,8 +331,8 @@ class OpenCodeGoProvider implements vscode.LanguageModelChatProvider<OpenCodeGoM
           order: 2
         },
         isUserSelectable: true,
-        maxInputTokens: limits.contextWindow,
-        maxOutputTokens: limits.maxOutputTokens,
+        maxInputTokens: limits.advertisedMaxInputTokens,
+        maxOutputTokens: limits.advertisedMaxOutputTokens,
         capabilities: modelCapabilities(),
         endpointKind: modelEndpointKind(modelId)
       };
@@ -385,7 +400,7 @@ class OpenCodeGoProvider implements vscode.LanguageModelChatProvider<OpenCodeGoM
     _token: vscode.CancellationToken
   ): Promise<number> {
     const value = typeof text === "string" ? text : messageText(text);
-    return Math.ceil(value.length / 4);
+    return estimateTokenCount(value);
   }
 
   private async fetchModels(): Promise<string[]> {
@@ -919,11 +934,34 @@ function modelLimits(modelId: string, settings = getSettings()): ModelLimits {
   const limits = MODEL_LIMITS[modelId] ?? DEFAULT_MODEL_LIMITS;
   const contextWindow = positiveOverride(settings.maxInputTokensOverride) ?? limits.contextWindow;
   const maxOutputTokens = positiveOverride(settings.maxOutputTokensOverride) ?? limits.maxOutputTokens;
+  const apiMaxOutputTokens = Math.min(maxOutputTokens, contextWindow);
+  const advertisedContextWindow = contextWindow + apiMaxOutputTokens;
+  const advertisedMaxOutputTokens = Math.max(1, Math.min(apiMaxOutputTokens, UI_OUTPUT_TOKEN_RESERVE));
 
   return {
     contextWindow,
-    maxOutputTokens: Math.min(maxOutputTokens, contextWindow)
+    maxOutputTokens: apiMaxOutputTokens,
+    advertisedContextWindow,
+    advertisedMaxInputTokens: Math.max(1, advertisedContextWindow - advertisedMaxOutputTokens),
+    advertisedMaxOutputTokens
   };
+}
+
+function estimateTokenCount(value: string): number {
+  if (!value) {
+    return 0;
+  }
+
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  const cjkCharacters = normalized.match(/[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/gu)?.length ?? 0;
+  const words = normalized.match(/[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/gu)?.length ?? 0;
+  const charEstimate = Math.ceil(normalized.length / 4);
+
+  return Math.max(1, Math.ceil(Math.max(words * 1.15, charEstimate, cjkCharacters)));
 }
 
 function positiveOverride(value: number): number | undefined {

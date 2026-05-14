@@ -8,6 +8,8 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 - Added `opencodego.debugReasoning` to write provider `reasoning_content` to **Output → OpenCode Go** for opt-in debugging.
 
 ### Fixed
+- Kept advertised context-size metadata consistent across the Language Models table, Copilot model picker tooltip, and chat context indicator while preserving the full OpenCode Go max-output limit for API requests.
+- Improved provider token counting for mixed chat/tool content so Copilot receives a more realistic context usage estimate.
 - Stopped resolving an extra unconfigured OpenCode Go model group from the legacy command-stored API key.
 - Native Language Models entries are now produced only for configured provider groups, preventing duplicate model rows.
 - Cached native BYOK API keys per resolved model so Copilot chat requests continue to work when VS Code does not pass provider configuration into `provideLanguageModelChatResponse`.

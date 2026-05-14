@@ -78,6 +78,8 @@ https://opencode.ai/zen/go/v1/models
 
 Because the endpoint returns IDs only, a bundled metadata table provides accurate context window and max output tokens per model. If the live fetch fails, the bundled list is used as a fallback.
 
+VS Code and Copilot read separate input/output metadata fields for UI display. OpenCode Go models can have very large output limits, so the extension advertises a small response reserve to keep the Language Models table, model picker tooltip, and chat context indicator consistent while still sending each model's full bundled max output limit to the OpenCode Go API.
+
 ### Bundled model limits
 
 | Model | Context window | Max output tokens |
