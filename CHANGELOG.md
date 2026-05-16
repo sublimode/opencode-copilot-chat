@@ -2,6 +2,39 @@
 
 All notable changes to the **OpenCode Go BYOK Provider** extension are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Filter deprecated OpenCode models using the models.dev registry before registering them with VS Code, with a local safety list for free models that now return provider 404s (`ring-2.6-1t-free`, `trinity-large-preview-free`).
+- Removed stale unavailable models from bundled fallback lists so offline fallback does not reintroduce models that can no longer serve requests.
+- API errors now use the active provider display name instead of always saying `OpenCode Go`.
+
+## [0.1.3] — 2026-05-16
+
+### Fixed
+
+- **Context size now correct in picker and chat bar.** Removed the formula that inflated `advertisedContextWindow` by adding `maxOutputTokens` on top of `contextWindow`, which caused VS Code to round up and display `2M` for models with 262K or 1M actual context.
+- **Model limits ported from models.dev (official OpenCode registry).** All context and output limits are now sourced from the authoritative `models.dev/api.json` registry, fixing previously wrong values across most models:
+  - `qwen3.6-plus-free` / `qwen3.6-plus` / `qwen3.5-plus`: corrected from 1 M → **262 K** context
+  - `glm-5` / `glm-5.1` max output: corrected from 32 K → **131 K**
+  - `minimax-m2.5` max output: corrected from 65 K → **131 K**
+  - `mimo-v2-omni` max output: corrected from 65 K → **128 K**
+  - `hy3-preview`: corrected from 262 K / 128 K → **256 K / 64 K**
+  - `ring-2.6-1t-free`: corrected to **262 K / 66 K**
+  - `trinity-large-preview-free`: corrected to **131 K / 131 K**
+  - `nemotron-3-super-free`: corrected from 262 K → **204 K** context, 65 K → **128 K** output
+  - `big-pickle`: corrected from 262 K → **200 K** context, 65 K → **128 K** output
+- **Model limits are now per-provider (Zen vs Go).** `MODEL_LIMITS_BY_PROVIDER` prevents Go and Zen limits from contaminating each other when both providers expose a model with the same ID (e.g. `qwen3.6-plus`, `glm-5.1`, `minimax-m2.7`).
+- **Hard cache-bust for VS Code picker metadata.** Model `id`, `family`, and `version` fields now encode a per-revision token (`ctxfix-2026-05-16-b`) so VS Code drops stale context-size metadata after this update instead of showing old values.
+- **API requests always use the raw upstream model ID**, never the revisioned effective ID, so backend routing is unaffected by the cache-bust strategy.
+- **`qwen3.6-plus-free` deprecation label corrected.** Earlier sessions incorrectly labelled the model as deprecated based on a community PR that was ultimately rejected. The model is actively re-enabled by the OpenCode team ("Round 2 — found more GPUs"). Label is now "Limited capacity" with a note to retry on 5xx rather than "Deprecated upstream".
+
+### Changed
+
+- `provideLanguageModelChatResponse` now resolves the raw model ID via `model.rawModelId` before calling `modelLimits()` and forwarding the ID to the backend, so the revisioned effective ID is never sent to the OpenCode API.
+- `modelLimits()` now accepts an optional `vendor` parameter; callers inside `OpenCodeProvider` pass `this.definition.vendor` for accurate per-provider lookups.
+
 ## [0.1.2] — 2026-05-14
 
 ### Added
