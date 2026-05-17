@@ -2,7 +2,7 @@
   "name": "opencode-copilot-chat",
   "displayName": "OpenCode Copilot Chat",
   "description": "Bring your own OpenCode API key to VS Code Copilot Chat. Adds OpenCode Go and OpenCode Zen models through the Language Model Chat Provider API.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "ltmoerdani",
   "license": "MIT",
   "icon": "media/opencodego.png",
@@ -90,6 +90,11 @@
           "type": "boolean",
           "default": false,
           "description": "Write provider reasoning_content to the OpenCode output channel for debugging. Reasoning is not shown in Copilot Chat."
+        },
+        "opencodego.freeOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, only free OpenCode Zen models are shown in the Copilot model selector. Disable to include paid Zen models as well."
         }
       }
     },
