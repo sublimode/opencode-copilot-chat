@@ -25,7 +25,7 @@ const KNOWN_UNAVAILABLE_MODEL_IDS = new Set([
   "trinity-large-preview-free"
 ]);
 // Bump this when we need to force VS Code picker metadata refresh.
-const MODEL_METADATA_REVISION = "ctxfix-2026-05-16-c";
+const MODEL_METADATA_REVISION = "thinking-2026-05-17-d";
 
 const PROVIDERS: Record<ProviderDefinition["vendor"], ProviderDefinition> = {
   [GO_VENDOR]: {
@@ -87,6 +87,7 @@ interface OpenCodeModel extends vscode.LanguageModelChatInformation {
     order: number;
   };
   isUserSelectable?: boolean;
+  configurationSchema?: vscode.LanguageModelConfigurationSchema;
 }
 
 interface ModelListResponse {
@@ -135,11 +136,20 @@ interface PendingToolCall {
   arguments: string;
 }
 
+interface ThinkingSettings {
+  deepseek: "off" | "high" | "max";
+  glm: "on" | "off";
+  kimi: "on" | "off";
+  qwen: "auto" | "on" | "off";
+  qwenBudget: "auto" | "4096" | "16384" | "32768" | "81920";
+}
+
 interface ApiSettings {
   temperature: number;
   maxOutputTokensOverride: number;
   maxInputTokensOverride: number;
   debugReasoning: boolean;
+  thinking: ThinkingSettings;
 }
 
 interface LanguageModelConfiguration {
@@ -267,9 +277,32 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("opencodego.manage", () => goProvider.manage()),
     vscode.commands.registerCommand("opencodego.diagnostics", () => goProvider.showDiagnostics()),
     vscode.commands.registerCommand("opencodego.setApiKey", () => goProvider.setApiKey()),
-    vscode.commands.registerCommand("opencodezen.diagnostics", () => zenProvider.showDiagnostics())
+    vscode.commands.registerCommand("opencodezen.diagnostics", () => zenProvider.showDiagnostics()),
+    vscode.commands.registerCommand("opencodego.setThinkingEffort", () => showThinkingEffortPicker())
   );
+}
 
+async function showThinkingEffortPicker(): Promise<void> {
+  const families: { label: string; key: keyof ThinkingSettings; options: string[] }[] = [
+    { label: "DeepSeek (deepseek-v4-*)", key: "deepseek", options: ["off", "high", "max"] },
+    { label: "GLM (glm-5, glm-5.1)", key: "glm", options: ["on", "off"] },
+    { label: "Kimi (kimi-k2.*)", key: "kimi", options: ["on", "off"] },
+    { label: "Qwen (qwen3.*)", key: "qwen", options: ["auto", "on", "off"] },
+    { label: "Qwen Thinking Budget", key: "qwenBudget", options: ["auto", "4096", "16384", "32768", "81920"] }
+  ];
+  const settings = getSettings().thinking;
+  const family = await vscode.window.showQuickPick(
+    families.map(f => ({ label: f.label, description: `current: ${settings[f.key]}`, family: f })),
+    { placeHolder: "Pick a model family to configure Thinking" }
+  );
+  if (!family) return;
+  const choice = await vscode.window.showQuickPick(family.family.options, {
+    placeHolder: `Set ${family.family.label} → Thinking value`
+  });
+  if (!choice) return;
+  const cfg = vscode.workspace.getConfiguration("opencodego.thinking");
+  await cfg.update(family.family.key, choice, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`OpenCode Thinking — ${family.family.label}: ${choice}`);
 }
 
 export function deactivate() {
@@ -465,8 +498,9 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       const capacityNote = CAPACITY_LIMITED_MODEL_NOTES[modelId];
       const baseDetail = this.definition.vendor === ZEN_VENDOR && isFreeZenModel(modelId) ? "Free" : this.definition.displayName;
       const baseTooltip = `${this.definition.displayName} model: ${modelId}`;
+      const configurationSchema = modelConfigurationSchema(modelId);
 
-      return {
+      const info: OpenCodeModel = {
         id: effectiveModelId,
         rawModelId: modelId,
         name: `${this.definition.modelNamePrefix} / ${formatModelName(modelId)}`,
@@ -485,8 +519,15 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         maxOutputTokens: limits.advertisedMaxOutputTokens,
         capabilities: modelCapabilities(modelId),
         endpointKind: modelEndpointKind(modelId, this.definition),
-        provider: this.definition
+        provider: this.definition,
+        // Inline so Copilot Chat picks up the Thinking submenu directly
+        // (parity with zelosleone/Opencode-Go-For-Copilot pattern).
+        ...(configurationSchema ? { configurationSchema } : {})
       };
+
+      this.log(`Model registered: id=${info.id} family=${info.family} configurationSchema=${configurationSchema ? JSON.stringify(configurationSchema) : "none"}`);
+
+      return info;
     });
   }
 
@@ -506,8 +547,16 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     }
 
     const apiMessages = normalizeMessages(messages.flatMap((message) => convertMessage(message, this.reasoningContentByToolCallId)));
-    const settings = getSettings();
+    const baseSettings = getSettings();
     const rawModelId = model.rawModelId ?? resolveRawModelId(model.id);
+    // Apply per-request Thinking selection (from Copilot Chat submenu) on top
+    // of the workspace default. The override only affects the current model
+    // family; other families remain at their global defaults.
+    const requestOverride = getRequestModelConfiguration(options);
+    const settings: ApiSettings = {
+      ...baseSettings,
+      thinking: applyRequestThinkingOverride(rawModelId, baseSettings.thinking, requestOverride)
+    };
     const limits = modelLimits(rawModelId, settings, model.provider.vendor);
 
     this.log(`Request: model=${model.id} rawModel=${rawModelId} endpoint=${model.endpointKind} messages=${apiMessages.length}`);
@@ -656,14 +705,10 @@ async function streamChatCompletions(
     }
   });
 
-  // Qwen3 family ships with hybrid thinking mode enabled by default. When that
-  // happens via the OpenAI-compatible endpoint, the stream only contains
-  // delta.reasoning_content and delta.content stays empty, which surfaces as
-  // "request completed but no output" in Copilot. Disable it explicitly so the
-  // model writes its answer into delta.content. We still keep the reasoning
-  // fallback below to cover other providers that ignore the flag.
-  const isQwen = /^qwen3(?:\.|-)/i.test(modelId);
-  const qwenThinkingPatch = isQwen ? { enable_thinking: false } : {};
+  // Per-family Thinking controls. Replaces the previous hard-coded Qwen patch.
+  // Default Qwen config is `off`, which preserves the prior behavior of
+  // explicitly disabling hybrid thinking to avoid empty Copilot replies.
+  const thinkingPayload = buildThinkingPayload(modelId, settings.thinking);
 
   await streamOpenCodeResponse(
     url,
@@ -675,7 +720,7 @@ async function streamChatCompletions(
       temperature: settings.temperature,
       max_tokens: limits.maxOutputTokens,
       stream: true,
-      ...qwenThinkingPatch,
+      ...thinkingPayload,
       ...(tools.length ? { tools, tool_choice: toolChoice(options.toolMode) } : {})
     },
     progress,
@@ -709,6 +754,11 @@ async function streamAnthropicMessages(
 ): Promise<void> {
   const tools = mapAnthropicTools(options.tools);
   const extractor = new AnthropicResponseExtractor();
+  // Qwen3.x routes through the /messages endpoint but still accepts the
+  // OpenAI-style enable_thinking / thinking_budget flags via the OpenCode
+  // gateway. Apply the same per-family Thinking payload here so the picker
+  // setting works regardless of which endpoint a model is routed to.
+  const thinkingPayload = buildThinkingPayload(modelId, settings.thinking);
 
   await streamOpenCodeResponse(
     url,
@@ -720,6 +770,7 @@ async function streamAnthropicMessages(
       temperature: settings.temperature,
       max_tokens: limits.maxOutputTokens,
       stream: true,
+      ...thinkingPayload,
       ...(tools.length ? { tools, tool_choice: anthropicToolChoice(options.toolMode) } : {})
     },
     progress,
@@ -1337,6 +1388,129 @@ function parseToolInput(value: string): object {
   }
 }
 
+// Detect which Thinking family a raw model id belongs to. Used both to render
+// the per-model picker submenu (configurationSchema) and to map the user's
+// per-request selection back to the right OpenCode request field.
+type ThinkingFamily = "deepseek" | "glm" | "kimi" | "qwen" | null;
+function thinkingFamily(modelId: string): ThinkingFamily {
+  if (/^deepseek-/i.test(modelId)) return "deepseek";
+  if (/^glm-/i.test(modelId)) return "glm";
+  if (/^kimi-/i.test(modelId)) return "kimi";
+  if (/^qwen3(?:\.|-)/i.test(modelId)) return "qwen";
+  return null;
+}
+
+// Per-family JSON-Schema describing the inline submenu rendered by Copilot
+// Chat (VS Code 1.118+ LM API). `enumItemLabels` + `group: 'navigation'`
+// surface the options as a picker (e.g. "Thinking Effort: Low/High/...").
+function modelConfigurationSchema(modelId: string): vscode.LanguageModelConfigurationSchema | undefined {
+  const family = thinkingFamily(modelId);
+  if (!family) return undefined;
+
+  if (family === "deepseek") {
+    return {
+      properties: {
+        reasoningEffort: {
+          type: "string",
+          title: "Thinking",
+          enum: ["off", "high", "max"],
+          enumItemLabels: ["Off", "High", "Max"],
+          default: "off",
+          group: "navigation"
+        }
+      }
+    };
+  }
+
+  if (family === "glm" || family === "kimi") {
+    return {
+      properties: {
+        thinkingMode: {
+          type: "string",
+          title: "Thinking",
+          enum: ["on", "off"],
+          enumItemLabels: ["On", "Off"],
+          default: "off",
+          group: "navigation"
+        }
+      }
+    };
+  }
+
+  // qwen
+  return {
+    properties: {
+      thinkingMode: {
+        type: "string",
+        title: "Thinking",
+        enum: ["auto", "on", "off"],
+        enumItemLabels: ["Auto", "On", "Off"],
+        default: "off",
+        group: "navigation"
+      },
+      thinkingBudget: {
+        type: "string",
+        title: "Thinking Budget",
+        enum: ["auto", "4096", "16384", "32768", "81920"],
+        enumItemLabels: ["Auto", "4K", "16K", "32K", "80K"],
+        default: "auto",
+        group: "navigation"
+      }
+    }
+  };
+}
+
+// Merge per-request modelConfiguration (from the Copilot Chat submenu) onto
+// the global ThinkingSettings, so the picker selection wins over the workspace
+// default. Only the field for the model's own family is touched.
+function applyRequestThinkingOverride(
+  modelId: string,
+  base: ThinkingSettings,
+  override: Record<string, unknown> | undefined
+): ThinkingSettings {
+  if (!override) return base;
+  const family = thinkingFamily(modelId);
+  if (!family) return base;
+
+  const next: ThinkingSettings = { ...base };
+  const reasoningEffort = override.reasoningEffort;
+  const thinkingMode = override.thinkingMode;
+  const thinkingBudget = override.thinkingBudget;
+
+  if (family === "deepseek" && typeof reasoningEffort === "string") {
+    if (reasoningEffort === "off" || reasoningEffort === "high" || reasoningEffort === "max") {
+      next.deepseek = reasoningEffort;
+    }
+  }
+  if (family === "glm" && typeof thinkingMode === "string") {
+    if (thinkingMode === "on" || thinkingMode === "off") next.glm = thinkingMode;
+  }
+  if (family === "kimi" && typeof thinkingMode === "string") {
+    if (thinkingMode === "on" || thinkingMode === "off") next.kimi = thinkingMode;
+  }
+  if (family === "qwen") {
+    if (typeof thinkingMode === "string" && (thinkingMode === "auto" || thinkingMode === "on" || thinkingMode === "off")) {
+      next.qwen = thinkingMode;
+    }
+    if (typeof thinkingBudget === "string" && ["auto", "4096", "16384", "32768", "81920"].includes(thinkingBudget)) {
+      next.qwenBudget = thinkingBudget as ThinkingSettings["qwenBudget"];
+    }
+  }
+  return next;
+}
+
+function getRequestModelConfiguration(options: vscode.ProvideLanguageModelChatResponseOptions): Record<string, unknown> | undefined {
+  // The field is `modelConfiguration` in the current proposed API; older
+  // builds shipped it under `configuration` alongside the auth config. Accept
+  // both shapes defensively so the picker keeps working across VS Code
+  // versions.
+  const opts = options as vscode.ProvideLanguageModelChatResponseOptions & {
+    modelConfiguration?: Record<string, unknown>;
+    configuration?: Record<string, unknown>;
+  };
+  return opts.modelConfiguration ?? opts.configuration;
+}
+
 function getSettings(): ApiSettings {
   const config = vscode.workspace.getConfiguration("opencodego");
 
@@ -1344,8 +1518,53 @@ function getSettings(): ApiSettings {
     temperature: config.get("temperature", 0.2),
     maxOutputTokensOverride: config.get("maxTokens", 0),
     maxInputTokensOverride: config.get("maxInputTokens", 0),
-    debugReasoning: config.get("debugReasoning", false)
+    debugReasoning: config.get("debugReasoning", false),
+    thinking: {
+      deepseek: config.get<ThinkingSettings["deepseek"]>("thinking.deepseek", "off"),
+      glm: config.get<ThinkingSettings["glm"]>("thinking.glm", "off"),
+      kimi: config.get<ThinkingSettings["kimi"]>("thinking.kimi", "off"),
+      qwen: config.get<ThinkingSettings["qwen"]>("thinking.qwen", "off"),
+      qwenBudget: config.get<ThinkingSettings["qwenBudget"]>("thinking.qwenBudget", "auto")
+    }
   };
+}
+
+// Maps the per-family Thinking settings to the request fields each OpenCode
+// model family expects. Returns an object to spread into the request body.
+// Anything returned here is merged into the OpenAI- or Anthropic-style payload.
+function buildThinkingPayload(modelId: string, thinking: ThinkingSettings): Record<string, unknown> {
+  if (/^deepseek-/i.test(modelId)) {
+    if (thinking.deepseek === "off") {
+      return { reasoning_effort: "low" };
+    }
+    return { reasoning_effort: thinking.deepseek };
+  }
+
+  if (/^glm-/i.test(modelId)) {
+    return { thinking: { type: thinking.glm === "on" ? "enabled" : "disabled" } };
+  }
+
+  if (/^kimi-/i.test(modelId)) {
+    return { thinking: { type: thinking.kimi === "on" ? "enabled" : "disabled" } };
+  }
+
+  if (/^qwen3(?:\.|-)/i.test(modelId)) {
+    if (thinking.qwen === "auto") {
+      // Let the model decide; don't send enable_thinking. Budget is only
+      // meaningful when thinking is active, so honor it here as well.
+      return thinking.qwenBudget === "auto"
+        ? {}
+        : { thinking_budget: Number(thinking.qwenBudget) };
+    }
+    if (thinking.qwen === "on") {
+      return thinking.qwenBudget === "auto"
+        ? { enable_thinking: true }
+        : { enable_thinking: true, thinking_budget: Number(thinking.qwenBudget) };
+    }
+    return { enable_thinking: false };
+  }
+
+  return {};
 }
 
 function modelLimits(
