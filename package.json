@@ -2,7 +2,7 @@
   "name": "opencode-copilot-chat",
   "displayName": "OpenCode Copilot Chat",
   "description": "Bring your own OpenCode API key to VS Code Copilot Chat. Adds OpenCode Go and OpenCode Zen models through the Language Model Chat Provider API.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "ltmoerdani",
   "license": "MIT",
   "icon": "media/opencodego.png",
@@ -41,6 +41,7 @@
     "onCommand:opencodego.diagnostics",
     "onCommand:opencodego.setApiKey",
     "onCommand:opencodezen.diagnostics",
+    "onCommand:opencodego.setThinkingEffort",
     "onLanguageModelChatProvider:opencodego",
     "onLanguageModelChatProvider:opencodezen"
   ],
@@ -62,6 +63,14 @@
       {
         "command": "opencodezen.diagnostics",
         "title": "OpenCode Zen: Diagnostics"
+      },
+      {
+        "command": "opencodego.modelPickerDiagnostics",
+        "title": "OpenCode: Model Picker Diagnostics"
+      },
+      {
+        "command": "opencodego.setThinkingEffort",
+        "title": "OpenCode: Set Thinking Effort..."
       }
     ],
     "configuration": {
@@ -95,6 +104,36 @@
           "type": "boolean",
           "default": true,
           "description": "When enabled, only free OpenCode Zen models are shown in the Copilot model selector. Disable to include paid Zen models as well."
+        },
+        "opencodego.thinking.deepseek": {
+          "type": "string",
+          "enum": ["off", "high", "max"],
+          "default": "off",
+          "markdownDescription": "Thinking mode for DeepSeek models (`deepseek-v4-flash`, `deepseek-v4-pro`). Maps to `reasoning_effort`. `off` disables reasoning, `high`/`max` enable deeper reasoning."
+        },
+        "opencodego.thinking.glm": {
+          "type": "string",
+          "enum": ["on", "off"],
+          "default": "off",
+          "markdownDescription": "Thinking mode for GLM models (`glm-5`, `glm-5.1`). Maps to `thinking: { type: 'enabled' | 'disabled' }`."
+        },
+        "opencodego.thinking.kimi": {
+          "type": "string",
+          "enum": ["on", "off"],
+          "default": "off",
+          "markdownDescription": "Thinking mode for Kimi models (`kimi-k2.5`, `kimi-k2.6`). Maps to `thinking: { type: 'enabled' | 'disabled' }`."
+        },
+        "opencodego.thinking.qwen": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "default": "off",
+          "markdownDescription": "Thinking mode for Qwen models (`qwen3.5-plus`, `qwen3.6-plus`, `qwen3.6-plus-free`). Maps to `enable_thinking`. `auto` lets the model decide (omits the flag), `on`/`off` force-enable or disable hybrid thinking. Off is the recommended default to avoid empty Copilot replies."
+        },
+        "opencodego.thinking.qwenBudget": {
+          "type": "string",
+          "enum": ["auto", "4096", "16384", "32768", "81920"],
+          "default": "auto",
+          "markdownDescription": "Optional `thinking_budget` for Qwen models when thinking is `on` or `auto`. `auto` omits the field. Ignored when Qwen thinking is `off`."
         }
       }
     },
