@@ -100,6 +100,18 @@
           "default": false,
           "description": "Write provider reasoning_content to the OpenCode output channel for debugging. Reasoning is not shown in Copilot Chat."
         },
+        "opencodego.requestTimeoutSeconds": {
+          "type": "number",
+          "default": 600,
+          "minimum": 1,
+          "description": "Total request timeout in seconds for OpenCode Go and Zen chat requests. Prevents long-running Copilot requests from hanging indefinitely."
+        },
+        "opencodego.streamIdleTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 1,
+          "description": "Streaming idle timeout in seconds. If OpenCode stops sending response chunks for this long, the request is cancelled with a clear error."
+        },
         "opencodego.freeOnly": {
           "type": "boolean",
           "default": true,

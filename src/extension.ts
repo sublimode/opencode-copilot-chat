@@ -24,6 +24,10 @@ const KNOWN_UNAVAILABLE_MODEL_IDS = new Set([
   "ring-2.6-1t-free",
   "trinity-large-preview-free"
 ]);
+const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+const OPEN_CODE_CLIENT = "vscode-copilot-chat";
+const OPEN_CODE_USER_AGENT = "opencode-copilot-chat/0.1.6 VSCode";
 // Bump this when we need to force VS Code picker metadata refresh.
 const MODEL_METADATA_REVISION = "naming-2026-05-17-a";
 
@@ -149,6 +153,8 @@ interface ApiSettings {
   maxOutputTokensOverride: number;
   maxInputTokensOverride: number;
   debugReasoning: boolean;
+  requestTimeoutMs: number;
+  streamIdleTimeoutMs: number;
   thinking: ThinkingSettings;
 }
 
@@ -605,15 +611,20 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     };
     const limits = modelLimits(rawModelId, settings, model.provider.vendor);
     const thinkingPayload = buildThinkingPayload(rawModelId, settings.thinking);
+    const requestHeaders = buildOpenCodeRequestHeaders(
+      messages,
+      options,
+      rawModelId,
+    );
 
-    this.log(`Request: model=${model.id} rawModel=${rawModelId} endpoint=${model.endpointKind} messages=${apiMessages.length} modelConfiguration=${JSON.stringify(pickThinkingModelConfiguration(requestOverride))} thinking=${JSON.stringify(settings.thinking)} thinkingPayload=${JSON.stringify(thinkingPayload)}`);
+    this.log(`Request: model=${model.id} rawModel=${rawModelId} endpoint=${model.endpointKind} messages=${apiMessages.length} session=${requestHeaders["x-opencode-session"]} request=${requestHeaders["x-opencode-request"]} modelConfiguration=${JSON.stringify(pickThinkingModelConfiguration(requestOverride))} thinking=${JSON.stringify(settings.thinking)} thinkingPayload=${JSON.stringify(thinkingPayload)}`);
     if (settings.debugReasoning) {
       this.log("Reasoning debug is enabled. Provider reasoning_content will be written to this output channel when available.");
     }
 
     try {
       if (model.endpointKind === "messages") {
-        await streamAnthropicMessages(this.definition.messagesUrl, this.definition.displayName, apiKey, rawModelId, apiMessages, options, settings, limits, progress, token, this.getOutputChannel());
+        await streamAnthropicMessages(this.definition.messagesUrl, this.definition.displayName, apiKey, rawModelId, apiMessages, options, settings, limits, requestHeaders, progress, token, this.getOutputChannel());
         return;
       }
 
@@ -627,6 +638,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           options,
           settings,
           limits,
+          requestHeaders,
           progress,
           token,
           this.getOutputChannel()
@@ -644,6 +656,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         options,
         settings,
         limits,
+        requestHeaders,
         progress,
         token,
         this.getOutputChannel(),
@@ -658,6 +671,9 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       const message = error instanceof Error ? error.message : String(error);
       this.log(`ERROR model=${model.id}: ${message}`);
       this.getOutputChannel().show(true);
+      if (error instanceof OpenCodeRequestError) {
+        vscode.window.showErrorMessage(error.userMessage);
+      }
       throw error;
     }
   }
@@ -756,6 +772,7 @@ async function streamChatCompletions(
   options: vscode.ProvideLanguageModelChatResponseOptions,
   settings: ApiSettings,
   limits: ModelLimits,
+  requestHeaders: Record<string, string>,
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
   token: vscode.CancellationToken,
   output: vscode.OutputChannel,
@@ -788,12 +805,15 @@ async function streamChatCompletions(
       ...thinkingPayload,
       ...(tools.length ? { tools, tool_choice: toolChoice(options.toolMode) } : {})
     },
+    requestHeaders,
     progress,
     token,
     (data) => extractor.extractStreamParts(data),
     extractChatCompletionParts,
     output,
-    settings.debugReasoning
+    settings.debugReasoning,
+    settings.requestTimeoutMs,
+    settings.streamIdleTimeoutMs,
   );
 
   extractor.flushReasoningFallback(progress);
@@ -813,6 +833,7 @@ async function streamChatCompletionsWithAnthropicStream(
   options: vscode.ProvideLanguageModelChatResponseOptions,
   settings: ApiSettings,
   limits: ModelLimits,
+  requestHeaders: Record<string, string>,
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
   token: vscode.CancellationToken,
   output: vscode.OutputChannel
@@ -841,6 +862,7 @@ async function streamChatCompletionsWithAnthropicStream(
       ...thinkingPayload,
       ...(tools.length ? { tools, tool_choice: toolChoice(options.toolMode) } : {})
     },
+    requestHeaders,
     progress,
     token,
     (data) => {
@@ -852,7 +874,9 @@ async function streamChatCompletionsWithAnthropicStream(
       return openAiParts.length ? openAiParts : extractAnthropicParts(data);
     },
     output,
-    settings.debugReasoning
+    settings.debugReasoning,
+    settings.requestTimeoutMs,
+    settings.streamIdleTimeoutMs,
   );
 
   openAiExtractor.flushReasoningFallback(progress);
@@ -873,6 +897,7 @@ async function streamAnthropicMessages(
   options: vscode.ProvideLanguageModelChatResponseOptions,
   settings: ApiSettings,
   limits: ModelLimits,
+  requestHeaders: Record<string, string>,
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
   token: vscode.CancellationToken,
   output?: vscode.OutputChannel
@@ -898,13 +923,109 @@ async function streamAnthropicMessages(
       ...thinkingPayload,
       ...(tools.length ? { tools, tool_choice: anthropicToolChoice(options.toolMode) } : {})
     },
+    requestHeaders,
     progress,
     token,
     (data) => extractor.extractStreamParts(data),
     extractAnthropicParts,
     output,
-    settings.debugReasoning
+    settings.debugReasoning,
+    settings.requestTimeoutMs,
+    settings.streamIdleTimeoutMs,
   );
+}
+
+// The official OpenCode client sends these headers on every request. The Zen
+// gateway reads x-opencode-session first, then converts that sticky identifier
+// into provider-specific affinity headers such as x-session-affinity upstream.
+//
+// VS Code's provider API does not currently expose a guaranteed public session
+// identifier everywhere, so we first probe a few known internal fields and then
+// fall back to a stable hash of the first messages in the conversation. That
+// preserves sticky routing and cache affinity without depending on hidden state.
+function buildOpenCodeRequestHeaders(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  options: vscode.ProvideLanguageModelChatResponseOptions,
+  modelId: string,
+): Record<string, string> {
+  const sessionId = cleanHeaderValue(
+    findStringOption(options, [
+      "sessionId",
+      "sessionID",
+      "chatSessionId",
+      "chatSessionID",
+      "conversationId",
+      "conversationID",
+      "threadId",
+      "threadID",
+      "session.id",
+      "chatSession.id",
+    ]) ?? `vscode-${stableHash(conversationAnchor(messages, modelId))}`,
+  );
+  const requestId = cleanHeaderValue(
+    findStringOption(options, [
+      "requestId",
+      "requestID",
+      "messageId",
+      "messageID",
+    ]) ??
+      `req-${stableHash(`${Date.now()}-${Math.random()}-${sessionId}-${modelId}`)}`,
+  );
+
+  return {
+    "x-opencode-session": sessionId,
+    "x-opencode-request": requestId,
+    "x-opencode-client": OPEN_CODE_CLIENT,
+    "User-Agent": OPEN_CODE_USER_AGENT,
+  };
+}
+
+function findStringOption(
+  options: unknown,
+  paths: string[],
+): string | undefined {
+  for (const path of paths) {
+    const value = readPath(options, path.split("."));
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function readPath(value: unknown, path: string[]): unknown {
+  let current = value;
+  for (const segment of path) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[segment];
+  }
+  return current;
+}
+
+function conversationAnchor(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  modelId: string,
+): string {
+  const anchorMessages = messages
+    .slice(0, 3)
+    .map((message) => `${message.role}:${messageText(message).slice(0, 2048)}`);
+  return anchorMessages.length ? anchorMessages.join("\n") : modelId;
+}
+
+function cleanHeaderValue(value: string): string {
+  const cleaned = value.replace(/[\r\n]/g, " ").trim();
+  return cleaned ? cleaned.slice(0, 256) : "unknown";
+}
+
+function stableHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function mapOpenAiTools(tools: readonly vscode.LanguageModelChatTool[] | undefined): OpenAiToolDefinition[] {
@@ -1022,38 +1143,76 @@ async function streamOpenCodeResponse(
   providerDisplayName: string,
   apiKey: string,
   body: unknown,
+  requestHeaders: Record<string, string>,
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
   token: vscode.CancellationToken,
   extractStreamParts: (data: unknown) => vscode.LanguageModelResponsePart[],
   extractFullParts: (data: unknown) => vscode.LanguageModelResponsePart[],
   output?: vscode.OutputChannel,
-  verbose: boolean = false
+  verbose: boolean = false,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  streamIdleTimeoutMs = DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 ): Promise<void> {
   const controller = new AbortController();
-  const cancellation = token.onCancellationRequested(() => controller.abort());
+  let abortReason:
+    | "request-timeout"
+    | "stream-idle-timeout"
+    | "cancelled"
+    | undefined;
+  const abort = (reason: typeof abortReason) => {
+    abortReason ??= reason;
+    controller.abort();
+  };
+  const cancellation = token.onCancellationRequested(() => abort("cancelled"));
+  const requestTimeout = setTimeout(
+    () => abort("request-timeout"),
+    requestTimeoutMs,
+  );
+  let streamIdleTimeout: ReturnType<typeof setTimeout> | undefined;
+  const resetStreamIdleTimeout = () => {
+    if (streamIdleTimeout) {
+      clearTimeout(streamIdleTimeout);
+    }
+    streamIdleTimeout = setTimeout(
+      () => abort("stream-idle-timeout"),
+      streamIdleTimeoutMs,
+    );
+  };
 
   try {
     const payload = JSON.stringify(body);
-    output?.appendLine(`[request] url=${url} payloadBytes=${payload.length}`);
+    output?.appendLine(`[request] url=${url} payloadBytes=${payload.length} requestTimeoutMs=${requestTimeoutMs} streamIdleTimeoutMs=${streamIdleTimeoutMs}`);
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        ...requestHeaders,
       },
       body: payload,
       signal: controller.signal
     });
 
     output?.appendLine(`[http] ${response.status} ${response.statusText} content-type=${response.headers.get("content-type") ?? "<none>"}`);
+    const rateLimitSummary = formatRateLimitSummary(
+      readRateLimitInfo(response.headers),
+    );
+    if (rateLimitSummary) {
+      output?.appendLine(`[rate-limit] ${rateLimitSummary}`);
+    }
 
     if (!response.ok) {
       const detail = await response.text();
       const modelId = (isRecord(body) && typeof (body as { model?: unknown }).model === "string") ? (body as { model: string }).model : undefined;
-      const modelHint = modelId ? ` model=${modelId}` : "";
-      const sizeHint = ` payloadBytes=${payload.length}`;
       const capacityHint = (modelId && CAPACITY_LIMITED_MODEL_NOTES[modelId] && response.status >= 500) ? ` — ${CAPACITY_LIMITED_MODEL_NOTES[modelId]}` : "";
-      throw new Error(`${providerDisplayName} API request failed (${response.status})${modelHint}${sizeHint}${capacityHint}: ${detail || response.statusText}`);
+      throw buildOpenCodeRequestError(
+        providerDisplayName,
+        response,
+        detail,
+        modelId,
+        payload.length,
+        capacityHint,
+      );
     }
 
     const contentType = response.headers.get("content-type") ?? "";
@@ -1075,12 +1234,14 @@ async function streamOpenCodeResponse(
     let buffer = "";
     let totalBytes = 0;
     let totalEvents = 0;
+    resetStreamIdleTimeout();
 
     while (!token.isCancellationRequested) {
       const { value, done } = await reader.read();
       if (done) {
         break;
       }
+      resetStreamIdleTimeout();
 
       totalBytes += value?.byteLength ?? 0;
       const chunk = decoder.decode(value, { stream: true });
@@ -1114,9 +1275,336 @@ async function streamOpenCodeResponse(
     if (output) {
       output.appendLine(`[sse-stats] totalBytes=${totalBytes} totalEvents=${totalEvents} bufferTailLen=${buffer.length}`);
     }
+  } catch (error) {
+    if (abortReason === "cancelled") {
+      return;
+    }
+    if (abortReason === "request-timeout") {
+      throw new OpenCodeRequestError(
+        `${providerDisplayName} request timed out after ${formatDuration(requestTimeoutMs)}.`,
+        `${providerDisplayName} did not start or finish the request within ${formatDuration(requestTimeoutMs)}. Try again later or reduce the request size.`,
+      );
+    }
+    if (abortReason === "stream-idle-timeout") {
+      throw new OpenCodeRequestError(
+        `${providerDisplayName} stream stalled for ${formatDuration(streamIdleTimeoutMs)} without new data.`,
+        `${providerDisplayName} stopped sending stream data for ${formatDuration(streamIdleTimeoutMs)}, so the request was cancelled to avoid leaving Copilot stuck.`,
+      );
+    }
+    throw error;
   } finally {
+    clearTimeout(requestTimeout);
+    if (streamIdleTimeout) {
+      clearTimeout(streamIdleTimeout);
+    }
     cancellation.dispose();
   }
+}
+
+class OpenCodeRequestError extends Error {
+  constructor(
+    message: string,
+    readonly userMessage: string = message,
+  ) {
+    super(message);
+    this.name = "OpenCodeRequestError";
+  }
+}
+
+interface ParsedApiError {
+  message?: string;
+  code?: string;
+  type?: string;
+  retryIn?: string;
+}
+
+interface RateLimitInfo {
+  retryAfterMs?: number;
+  resetAfterMs?: number;
+  requestLimit?: string;
+  requestRemaining?: string;
+  tokenLimit?: string;
+  tokenRemaining?: string;
+}
+
+function buildOpenCodeRequestError(
+  providerDisplayName: string,
+  response: Response,
+  rawDetail: string,
+  modelId: string | undefined,
+  payloadBytes: number,
+  capacityHint: string,
+): OpenCodeRequestError {
+  const apiError = parseApiError(rawDetail);
+  const rateLimitInfo = readRateLimitInfo(response.headers);
+  const modelHint = modelId ? ` model=${modelId}` : "";
+  const sizeHint = ` payloadBytes=${payloadBytes}`;
+  const apiMessage =
+    (apiError.message ?? rawDetail.trim()) || response.statusText;
+  const isLimit = isRateLimitResponse(response.status, apiError);
+
+  if (isLimit) {
+    const waitText =
+      apiError.retryIn ??
+      formatWaitText(rateLimitInfo.retryAfterMs ?? rateLimitInfo.resetAfterMs);
+    const quotaText = formatRateLimitSummary(rateLimitInfo);
+    const reason = classifyRateLimit(apiError, response.status);
+    const details = [
+      shouldIncludeApiMessage(apiMessage, reason) ? apiMessage : undefined,
+      waitText ? `Retry after ${waitText}.` : undefined,
+      quotaText ? `Quota: ${quotaText}.` : undefined,
+    ].filter((part): part is string => Boolean(part));
+    const userMessage =
+      `${providerDisplayName}: ${reason}${modelHint ? ` (${modelId})` : ""}. ${details.join(" ")}`.trim();
+    return new OpenCodeRequestError(
+      `${providerDisplayName} API rate/quota limit (${response.status})${modelHint}${sizeHint}: ${apiMessage}; ${quotaText || "no quota headers"}`,
+      userMessage,
+    );
+  }
+
+  const userMessage = `${providerDisplayName} API request failed (HTTP ${response.status})${modelHint ? ` for ${modelId}` : ""}: ${apiMessage}${capacityHint}`;
+  return new OpenCodeRequestError(
+    `${providerDisplayName} API request failed (${response.status})${modelHint}${sizeHint}${capacityHint}: ${apiMessage}`,
+    userMessage,
+  );
+}
+
+function parseApiError(rawDetail: string): ParsedApiError {
+  const fallback = rawDetail.trim();
+  if (!fallback) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(fallback) as unknown;
+    if (!isRecord(parsed)) {
+      return { message: fallback };
+    }
+
+    const error = isRecord(parsed.error) ? parsed.error : parsed;
+    return {
+      message: firstString(error.message, parsed.message, fallback),
+      code: firstString(error.code, parsed.code),
+      type: firstString(error.type, parsed.type),
+      retryIn: firstString(
+        error.retryIn,
+        parsed.retryIn,
+        error.retry_in,
+        parsed.retry_in,
+      ),
+    };
+  } catch {
+    return { message: fallback };
+  }
+}
+
+function readRateLimitInfo(headers: Headers): RateLimitInfo {
+  const retryAfter = firstHeader(headers, ["retry-after"]);
+  const requestLimit = firstHeader(headers, [
+    "x-ratelimit-limit-requests",
+    "anthropic-ratelimit-requests-limit",
+    "x-ratelimit-limit",
+    "ratelimit-limit",
+  ]);
+  const requestRemaining = firstHeader(headers, [
+    "x-ratelimit-remaining-requests",
+    "anthropic-ratelimit-requests-remaining",
+    "x-ratelimit-remaining",
+    "ratelimit-remaining",
+  ]);
+  const tokenLimit = firstHeader(headers, [
+    "x-ratelimit-limit-tokens",
+    "anthropic-ratelimit-tokens-limit",
+  ]);
+  const tokenRemaining = firstHeader(headers, [
+    "x-ratelimit-remaining-tokens",
+    "anthropic-ratelimit-tokens-remaining",
+  ]);
+  const reset = firstHeader(headers, [
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+    "anthropic-ratelimit-requests-reset",
+    "anthropic-ratelimit-tokens-reset",
+    "x-ratelimit-reset",
+    "ratelimit-reset",
+  ]);
+
+  return {
+    retryAfterMs: parseRetryAfter(retryAfter),
+    resetAfterMs: parseResetAfter(reset),
+    requestLimit,
+    requestRemaining,
+    tokenLimit,
+    tokenRemaining,
+  };
+}
+
+function formatRateLimitSummary(info: RateLimitInfo): string | undefined {
+  const parts = [
+    info.requestRemaining || info.requestLimit
+      ? `requests remaining=${info.requestRemaining ?? "?"}${info.requestLimit ? `/${info.requestLimit}` : ""}`
+      : undefined,
+    info.tokenRemaining || info.tokenLimit
+      ? `tokens remaining=${info.tokenRemaining ?? "?"}${info.tokenLimit ? `/${info.tokenLimit}` : ""}`
+      : undefined,
+    info.retryAfterMs !== undefined
+      ? `retry-after=${formatDuration(info.retryAfterMs)}`
+      : undefined,
+    info.resetAfterMs !== undefined
+      ? `reset=${formatDuration(info.resetAfterMs)}`
+      : undefined,
+  ].filter((part): part is string => Boolean(part));
+
+  return parts.length ? parts.join("; ") : undefined;
+}
+
+function classifyRateLimit(apiError: ParsedApiError, status: number): string {
+  const code =
+    `${apiError.code ?? ""} ${apiError.type ?? ""} ${apiError.message ?? ""}`.toLowerCase();
+  const compactCode = compactErrorCode(code);
+  if (compactCode.includes("gosubscriptionrollinglimitexceeded")) {
+    return "5-hour OpenCode Go usage limit reached";
+  }
+  if (compactCode.includes("gosubscriptionweeklylimitexceeded")) {
+    return "weekly OpenCode Go usage limit reached";
+  }
+  if (compactCode.includes("gosubscriptionmonthlylimitexceeded")) {
+    return "monthly OpenCode Go usage limit reached";
+  }
+  if (code.includes("subscriptionquota") || code.includes("quota")) {
+    return "OpenCode quota exceeded";
+  }
+  return status === 429
+    ? "rate limit exceeded"
+    : "OpenCode usage limit reached";
+}
+
+function isRateLimitResponse(
+  status: number,
+  apiError: ParsedApiError,
+): boolean {
+  const code =
+    `${apiError.code ?? ""} ${apiError.type ?? ""} ${apiError.message ?? ""}`.toLowerCase();
+  const compactCode = compactErrorCode(code);
+  return (
+    status === 429 ||
+    compactCode.includes("ratelimit") ||
+    code.includes("rate_limit") ||
+    code.includes("quota") ||
+    compactCode.includes("limitexceeded")
+  );
+}
+
+function compactErrorCode(value: string): string {
+  return value.replace(/[^a-z0-9]/g, "");
+}
+
+function shouldIncludeApiMessage(apiMessage: string, reason: string): boolean {
+  const normalizedMessage = compactErrorCode(apiMessage.toLowerCase());
+  const normalizedReason = compactErrorCode(reason.toLowerCase());
+  return (
+    Boolean(normalizedMessage) &&
+    !normalizedMessage.startsWith(normalizedReason)
+  );
+}
+
+function firstHeader(headers: Headers, names: string[]): string | undefined {
+  for (const name of names) {
+    const value = headers.get(name);
+    if (value?.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function parseRetryAfter(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+  const dateMs = Date.parse(value);
+  return Number.isFinite(dateMs)
+    ? Math.max(0, dateMs - Date.now())
+    : parseDurationLike(value);
+}
+
+function parseResetAfter(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    if (numeric > 1_000_000_000_000) {
+      return Math.max(0, numeric - Date.now());
+    }
+    if (numeric > 1_000_000_000) {
+      return Math.max(0, numeric * 1000 - Date.now());
+    }
+    return numeric * 1000;
+  }
+  const durationMs = parseDurationLike(value);
+  if (durationMs !== undefined) {
+    return durationMs;
+  }
+  return parseRetryAfter(value);
+}
+
+function parseDurationLike(value: string): number | undefined {
+  const matches = value
+    .trim()
+    .toLowerCase()
+    .matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h)/g);
+  let totalMs = 0;
+  let found = false;
+  for (const match of matches) {
+    found = true;
+    const amount = Number(match[1]);
+    const unit = match[2];
+    if (!Number.isFinite(amount)) {
+      continue;
+    }
+    if (unit === "ms") {
+      totalMs += amount;
+    } else if (unit === "s") {
+      totalMs += amount * 1000;
+    } else if (unit === "m") {
+      totalMs += amount * 60 * 1000;
+    } else if (unit === "h") {
+      totalMs += amount * 60 * 60 * 1000;
+    }
+  }
+  return found ? Math.max(0, Math.ceil(totalMs)) : undefined;
+}
+
+function formatWaitText(value: number | undefined): string | undefined {
+  return value === undefined ? undefined : formatDuration(value);
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 function truncateForLog(value: string, max = 1200): string {
@@ -1776,6 +2264,16 @@ function getSettings(): ApiSettings {
     maxOutputTokensOverride: config.get("maxTokens", 0),
     maxInputTokensOverride: config.get("maxInputTokens", 0),
     debugReasoning: config.get("debugReasoning", false),
+    requestTimeoutMs:
+      Math.max(config.get("requestTimeoutSeconds", DEFAULT_REQUEST_TIMEOUT_MS / 1000), 1) * 1000,
+    streamIdleTimeoutMs:
+      Math.max(
+        config.get(
+          "streamIdleTimeoutSeconds",
+          DEFAULT_STREAM_IDLE_TIMEOUT_MS / 1000,
+        ),
+        1,
+      ) * 1000,
     thinking: {
       deepseek: config.get<ThinkingSettings["deepseek"]>("thinking.deepseek", "off"),
       glm: config.get<ThinkingSettings["glm"]>("thinking.glm", "off"),
