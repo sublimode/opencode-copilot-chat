@@ -1,7 +1,35 @@
 import * as vscode from "vscode";
+import {
+  buildOpenCodeRequestError,
+  formatDuration,
+  formatRateLimitSummary,
+  OpenCodeRequestError,
+  readRateLimitInfo,
+  truncateForLog,
+} from "./errors";
+import {
+  MODEL_METADATA_CACHE_KEY,
+  MODEL_METADATA_REVISION,
+  MODELS_DEV_API_URL,
+  bundledModelMetadataSnapshot,
+  fallbackModelMetadata,
+  hasExplicitModelLimits,
+  isFreshModelMetadata,
+  normalizeLiveModelMetadata,
+  normalizeModelsDevSnapshot,
+  resolveModelMetadata,
+  toEffectiveModelId,
+  type ModelsDevResponse,
+} from "./metadata";
+import {
+  normalizeGoogleFullResponse,
+  normalizeGoogleStreamEvent,
+  normalizeResponsesFullResponse,
+  normalizeResponsesStreamEvent,
+  resolveModelRouting,
+} from "./routing";
+import { GO_VENDOR, ZEN_VENDOR } from "./providerTypes";
 
-const GO_VENDOR = "opencodego";
-const ZEN_VENDOR = "opencodezen";
 const SECRET_KEY = "opencodego.apiKey";
 
 interface ProviderDefinition {
@@ -25,7 +53,6 @@ type ModelEndpointKind =
   | "google";
 
 const FREE_ZEN_MODEL_IDS = new Set(["big-pickle"]);
-const MODELS_DEV_API_URL = "https://models.dev/api.json";
 const KNOWN_UNAVAILABLE_MODEL_IDS = new Set([
   "ring-2.6-1t",
   "ring-2.6-1t-free",
@@ -35,8 +62,6 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const OPEN_CODE_CLIENT = "vscode-copilot-chat";
 const OPEN_CODE_USER_AGENT = "opencode-copilot-chat/0.1.6 VSCode";
-// Bump this when we need to force VS Code picker metadata refresh.
-const MODEL_METADATA_REVISION = "session-2026-05-21-b";
 
 const PROVIDERS: Record<ProviderDefinition["vendor"], ProviderDefinition> = {
   [GO_VENDOR]: {
@@ -127,29 +152,6 @@ interface ModelListEntry {
 
 interface ModelListResponse {
   data?: ModelListEntry[];
-}
-
-interface ModelsDevModelRecord {
-  status?: string;
-  limit?: {
-    context?: number;
-    output?: number;
-  };
-  attachment?: boolean;
-  reasoning?: boolean;
-  modalities?: {
-    input?: string[];
-    output?: string[];
-  };
-}
-
-interface ModelsDevProviderRecord {
-  models?: Record<string, ModelsDevModelRecord>;
-}
-
-interface ModelsDevResponse {
-  opencode?: ModelsDevProviderRecord;
-  "opencode-go"?: ModelsDevProviderRecord;
 }
 
 interface ApiMessage {
@@ -256,55 +258,6 @@ interface ModelRoutingFields {
 // Copilot surfaces combine input/output metadata differently across views.
 // Reserve a modest UI output budget, while requests still use the real model max.
 const UI_OUTPUT_TOKEN_RESERVE = 8192;
-const MODEL_METADATA_CACHE_KEY = "opencodego.modelMetadataCache.v3";
-const MODEL_METADATA_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-
-const DEFAULT_MODEL_LIMITS: BaseModelLimits = {
-  contextWindow: 262144,
-  maxOutputTokens: 65536
-};
-
-const MODELS_DEV_PROVIDER_BY_VENDOR: Record<
-  ProviderDefinition["vendor"],
-  keyof ModelsDevResponse
-> = {
-  [GO_VENDOR]: "opencode-go",
-  [ZEN_VENDOR]: "opencode",
-};
-
-// Context limits sourced from models.dev (official OpenCode model registry).
-// Keep limits per provider to avoid cross-provider contamination in VS Code's
-// picker metadata cache.
-const MODEL_LIMITS_BY_PROVIDER: Record<ProviderDefinition["vendor"], Record<string, BaseModelLimits>> = {
-  [GO_VENDOR]: {
-    "deepseek-v4-flash": { contextWindow: 1000000, maxOutputTokens: 384000 },
-    "deepseek-v4-pro": { contextWindow: 1000000, maxOutputTokens: 384000 },
-    "mimo-v2.5": { contextWindow: 1000000, maxOutputTokens: 128000 },
-    "mimo-v2.5-pro": { contextWindow: 1048576, maxOutputTokens: 128000 },
-    "mimo-v2-omni": { contextWindow: 262144, maxOutputTokens: 128000 },
-    "mimo-v2-pro": { contextWindow: 1048576, maxOutputTokens: 128000 },
-    "kimi-k2.6": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "kimi-k2.5": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "glm-5.1": { contextWindow: 202752, maxOutputTokens: 32768 },
-    "glm-5": { contextWindow: 202752, maxOutputTokens: 32768 },
-    "minimax-m2.7": { contextWindow: 204800, maxOutputTokens: 131072 },
-    "minimax-m2.5": { contextWindow: 204800, maxOutputTokens: 65536 },
-    "qwen3.6-plus": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "qwen3.5-plus": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "hy3-preview": { contextWindow: 256000, maxOutputTokens: 64000 },
-    "ring-2.6-1t": { contextWindow: 262000, maxOutputTokens: 66000 }
-  },
-  [ZEN_VENDOR]: {
-    "deepseek-v4-flash-free": { contextWindow: 200000, maxOutputTokens: 128000 },
-    "minimax-m2.5-free": { contextWindow: 204800, maxOutputTokens: 131072 },
-    "qwen3.6-plus": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "qwen3.6-plus-free": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "qwen3.5-plus": { contextWindow: 262144, maxOutputTokens: 65536 },
-    "trinity-large-preview-free": { contextWindow: 131072, maxOutputTokens: 131072 },
-    "nemotron-3-super-free": { contextWindow: 204800, maxOutputTokens: 128000 },
-    "big-pickle": { contextWindow: 200000, maxOutputTokens: 128000 }
-  }
-};
 
 type CopilotCompatibleCapabilities = vscode.LanguageModelChatCapabilities & {
   supportsToolCalling: boolean;
@@ -323,23 +276,6 @@ const CAPACITY_LIMITED_MODEL_NOTES: Record<string, string> = {
 
 let modelMetadataSnapshot: CachedModelMetadataSnapshot | undefined;
 let modelMetadataRefreshPromise: Promise<CachedModelMetadataSnapshot> | undefined;
-
-const VISION_CAPABLE_MODELS = new Set([
-  "minimax-m2.7",
-  "minimax-m2.5",
-  "minimax-m2.5-free",
-  "kimi-k2.6",
-  "kimi-k2.5",
-  "glm-5.1",
-  "glm-5",
-  "mimo-v2.5",
-  "mimo-v2.5-pro",
-  "mimo-v2-omni",
-  "mimo-v2-pro",
-  "qwen3.6-plus",
-  "qwen3.6-plus-free",
-  "qwen3.5-plus"
-]);
 
 interface OpenAiToolDefinition {
   type: "function";
@@ -475,43 +411,12 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     modelId: string,
     snapshot: CachedModelMetadataSnapshot,
   ): ResolvedModelMetadata {
-    const cachedMetadata = snapshot.providers[this.definition.vendor][modelId];
-    const liveMetadata = this.liveModelMetadataById.get(modelId);
-    const fallbackMetadata = fallbackModelMetadata(modelId, this.definition.vendor);
-
-    return {
-      contextWindow:
-        liveMetadata?.contextWindow ??
-        cachedMetadata?.contextWindow ??
-        fallbackMetadata?.contextWindow ??
-        DEFAULT_MODEL_LIMITS.contextWindow,
-      maxOutputTokens:
-        liveMetadata?.maxOutputTokens ??
-        cachedMetadata?.maxOutputTokens ??
-        fallbackMetadata?.maxOutputTokens ??
-        DEFAULT_MODEL_LIMITS.maxOutputTokens,
-      supportsVision:
-        liveMetadata?.supportsVision ??
-        cachedMetadata?.supportsVision ??
-        fallbackMetadata?.supportsVision ??
-        false,
-      reasoning:
-        liveMetadata?.reasoning ??
-        cachedMetadata?.reasoning ??
-        fallbackMetadata?.reasoning ??
-        Boolean(thinkingFamily(modelId)),
-      status:
-        liveMetadata?.status ??
-        cachedMetadata?.status ??
-        fallbackMetadata?.status,
-      source: liveMetadata
-        ? "live"
-        : cachedMetadata
-          ? "models.dev"
-          : fallbackMetadata
-            ? "fallback"
-            : "default",
-    };
+    return resolveModelMetadata(
+      modelId,
+      this.definition.vendor,
+      snapshot,
+      this.liveModelMetadataById,
+    );
   }
 
   private replaceLiveModelMetadata(entries: ModelListEntry[] | undefined): void {
@@ -920,10 +825,6 @@ function getConfiguredApiKey(options?: { configuration?: LanguageModelConfigurat
   return typeof configuredApiKey === "string" && configuredApiKey.trim() ? configuredApiKey.trim() : undefined;
 }
 
-function isFreshModelMetadata(snapshot: CachedModelMetadataSnapshot): boolean {
-  return Date.now() - snapshot.fetchedAt < MODEL_METADATA_CACHE_TTL_MS;
-}
-
 async function clearOpenCodeModelMetadataCache(
   context: vscode.ExtensionContext,
 ): Promise<void> {
@@ -962,7 +863,9 @@ async function refreshOpenCodeModelMetadata(
   }
 
   modelMetadataRefreshPromise = (async () => {
-    const response = await fetch(MODELS_DEV_API_URL);
+    const response = await fetch(MODELS_DEV_API_URL, {
+      signal: AbortSignal.timeout(10_000)
+    });
 
     if (!response.ok) {
       throw new Error(`models.dev request failed (${response.status}): ${response.statusText}`);
@@ -1378,196 +1281,6 @@ function responsesAssistantText(content: ApiMessage["content"]): string {
     .join("");
 }
 
-function normalizeResponsesStreamEvent(data: unknown): unknown {
-  if (!isRecord(data)) {
-    return data;
-  }
-
-  const eventType = typeof data.type === "string" ? data.type : undefined;
-  if (!eventType) {
-    return data;
-  }
-
-  if (eventType === "response.output_text.delta") {
-    const delta = firstString(data.delta, data.text, data.output_text_delta);
-    return delta ? { choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] } : { choices: [] };
-  }
-
-  if (eventType === "response.output_item.added") {
-    const item = data.item;
-    if (isRecord(item) && item.type === "function_call" && typeof item.name === "string") {
-      return {
-        choices: [{
-          index: 0,
-          delta: {
-            tool_calls: [{
-              index: typeof data.output_index === "number" ? data.output_index : 0,
-              id: firstString(item.call_id, item.id) ?? "",
-              type: "function",
-              function: { name: item.name, arguments: "" },
-            }],
-          },
-          finish_reason: null,
-        }],
-      };
-    }
-  }
-
-  if (eventType === "response.function_call_arguments.delta") {
-    const delta = firstString(data.delta, data.arguments_delta);
-    return delta ? {
-      choices: [{
-        index: 0,
-        delta: {
-          tool_calls: [{
-            index: typeof data.output_index === "number" ? data.output_index : 0,
-            function: { arguments: delta },
-          }],
-        },
-        finish_reason: null,
-      }],
-    } : { choices: [] };
-  }
-
-  if (eventType.includes("reasoning")) {
-    const reasoning = extractResponsesReasoningText(data);
-    return reasoning ? { choices: [{ index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }] } : { choices: [] };
-  }
-
-  if (eventType === "response.completed") {
-    const response = isRecord(data.response) ? data.response : data;
-    const usage = normalizeResponsesUsage(response.usage);
-    return {
-      choices: [{
-        index: 0,
-        delta: {},
-        finish_reason: normalizeResponsesFinishReason(firstString(response.stop_reason, data.stop_reason)),
-      }],
-      ...(usage ? { usage } : {}),
-    };
-  }
-
-  return { choices: [] };
-}
-
-function normalizeResponsesFullResponse(data: unknown): unknown {
-  if (!isRecord(data) || Array.isArray(data.choices)) {
-    return data;
-  }
-
-  const response = isRecord(data.response) ? data.response : data;
-  const output = Array.isArray(response.output) ? response.output : [];
-  let text = "";
-  const toolCalls: Array<Record<string, unknown>> = [];
-
-  for (const item of output) {
-    if (!isRecord(item)) {
-      continue;
-    }
-
-    if (item.type === "message" && Array.isArray(item.content)) {
-      for (const part of item.content) {
-        if (isRecord(part) && part.type === "output_text" && typeof part.text === "string") {
-          text += part.text;
-        }
-      }
-      continue;
-    }
-
-    if (item.type === "function_call" && typeof item.name === "string") {
-      toolCalls.push({
-        id: firstString(item.call_id, item.id) ?? "",
-        type: "function",
-        function: {
-          name: item.name,
-          arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {}),
-        },
-      });
-    }
-  }
-
-  return {
-    choices: [{
-      index: 0,
-      message: {
-        ...(text ? { content: text } : {}),
-        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
-      },
-      finish_reason: normalizeResponsesFinishReason(firstString(response.stop_reason, response.finish_reason)),
-    }],
-    ...(normalizeResponsesUsage(response.usage) ? { usage: normalizeResponsesUsage(response.usage) } : {}),
-  };
-}
-
-function normalizeResponsesFinishReason(value: string | undefined): "stop" | "tool_calls" | "length" | "content_filter" | null {
-  if (!value) {
-    return null;
-  }
-
-  if (value === "completed" || value === "stop") {
-    return "stop";
-  }
-  if (value === "tool_call" || value === "tool_calls") {
-    return "tool_calls";
-  }
-  if (value === "max_output_tokens" || value === "length") {
-    return "length";
-  }
-  if (value.includes("filter") || value.includes("safety")) {
-    return "content_filter";
-  }
-
-  return null;
-}
-
-function normalizeResponsesUsage(usage: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(usage)) {
-    return undefined;
-  }
-
-  const promptTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : undefined;
-  const completionTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : undefined;
-  const cachedTokens = isRecord(usage.input_tokens_details) && typeof usage.input_tokens_details.cached_tokens === "number"
-    ? usage.input_tokens_details.cached_tokens
-    : undefined;
-
-  if (promptTokens === undefined && completionTokens === undefined) {
-    return undefined;
-  }
-
-  return {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined,
-    ...(cachedTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {}),
-  };
-}
-
-function extractResponsesReasoningText(data: Record<string, unknown>): string {
-  const direct = firstString(data.delta, data.text, data.summary_text, data.output_text_delta);
-  if (direct) {
-    return direct;
-  }
-
-  const item = data.item;
-  if (!isRecord(item)) {
-    return "";
-  }
-
-  if (typeof item.text === "string") {
-    return item.text;
-  }
-
-  if (Array.isArray(item.summary)) {
-    return item.summary
-      .filter((part): part is Record<string, unknown> => isRecord(part) && typeof part.text === "string")
-      .map((part) => part.text as string)
-      .join("");
-  }
-
-  return "";
-}
-
 function buildGoogleGenerateContentBody(
   messages: ApiMessage[],
   options: vscode.ProvideLanguageModelChatResponseOptions,
@@ -1685,157 +1398,6 @@ function dataUrlToInlineData(url: string): { mimeType: string; data: string } | 
     mimeType: match[1],
     data: match[2],
   };
-}
-
-function normalizeGoogleStreamEvent(data: unknown): unknown {
-  if (!isRecord(data)) {
-    return data;
-  }
-
-  const candidate = Array.isArray(data.candidates) && isRecord(data.candidates[0]) ? data.candidates[0] : undefined;
-  const parts = isRecord(candidate?.content) && Array.isArray(candidate.content.parts)
-    ? candidate.content.parts.filter(isRecord)
-    : [];
-  const text = parts
-    .filter((part) => typeof part.text === "string" && part.thought !== true)
-    .map((part) => part.text as string)
-    .join("");
-  const reasoning = parts
-    .filter((part) => typeof part.text === "string" && part.thought === true)
-    .map((part) => part.text as string)
-    .join("");
-  const toolCalls = parts.flatMap((part, index) => {
-    if (!isRecord(part.functionCall) || typeof part.functionCall.name !== "string") {
-      return [];
-    }
-
-    return [{
-      index,
-      id: "",
-      type: "function",
-      function: {
-        name: part.functionCall.name,
-        arguments: JSON.stringify(part.functionCall.args ?? {}),
-      },
-    }];
-  });
-  const usage = normalizeGoogleUsage(data.usageMetadata);
-
-  if (!text && !reasoning && !toolCalls.length && !candidate?.finishReason && !usage) {
-    return { choices: [] };
-  }
-
-  return {
-    choices: [{
-      index: 0,
-      delta: {
-        ...(text ? { content: text } : {}),
-        ...(reasoning ? { reasoning_content: reasoning } : {}),
-        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
-      },
-      finish_reason: normalizeGoogleFinishReason(
-        typeof candidate?.finishReason === "string" ? candidate.finishReason : undefined,
-        toolCalls.length > 0,
-      ),
-    }],
-    ...(usage ? { usage } : {}),
-  };
-}
-
-function normalizeGoogleFullResponse(data: unknown): unknown {
-  if (!isRecord(data) || Array.isArray(data.choices)) {
-    return data;
-  }
-
-  const candidate = Array.isArray(data.candidates) && isRecord(data.candidates[0]) ? data.candidates[0] : undefined;
-  const parts = isRecord(candidate?.content) && Array.isArray(candidate.content.parts)
-    ? candidate.content.parts.filter(isRecord)
-    : [];
-  const text = parts
-    .filter((part) => typeof part.text === "string" && part.thought !== true)
-    .map((part) => part.text as string)
-    .join("");
-  const reasoning = parts
-    .filter((part) => typeof part.text === "string" && part.thought === true)
-    .map((part) => part.text as string)
-    .join("");
-  const toolCalls = parts.flatMap((part) => {
-    if (!isRecord(part.functionCall) || typeof part.functionCall.name !== "string") {
-      return [];
-    }
-
-    return [{
-      id: "",
-      type: "function",
-      function: {
-        name: part.functionCall.name,
-        arguments: JSON.stringify(part.functionCall.args ?? {}),
-      },
-    }];
-  });
-  const usage = normalizeGoogleUsage(data.usageMetadata);
-
-  return {
-    choices: [{
-      index: 0,
-      message: {
-        ...(text ? { content: text } : {}),
-        ...(reasoning ? { reasoning_content: reasoning } : {}),
-        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
-      },
-      finish_reason: normalizeGoogleFinishReason(
-        typeof candidate?.finishReason === "string" ? candidate.finishReason : undefined,
-        toolCalls.length > 0,
-      ),
-    }],
-    ...(usage ? { usage } : {}),
-  };
-}
-
-function normalizeGoogleUsage(usage: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(usage)) {
-    return undefined;
-  }
-
-  const promptTokens = typeof usage.promptTokenCount === "number" ? usage.promptTokenCount : undefined;
-  const candidatesTokens = typeof usage.candidatesTokenCount === "number" ? usage.candidatesTokenCount : undefined;
-  const thoughtsTokens = typeof usage.thoughtsTokenCount === "number" ? usage.thoughtsTokenCount : undefined;
-  const cachedTokens = typeof usage.cachedContentTokenCount === "number" ? usage.cachedContentTokenCount : undefined;
-  const completionTokens = candidatesTokens !== undefined ? candidatesTokens + (thoughtsTokens ?? 0) : undefined;
-
-  if (promptTokens === undefined && completionTokens === undefined) {
-    return undefined;
-  }
-
-  return {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: typeof usage.totalTokenCount === "number"
-      ? usage.totalTokenCount
-      : promptTokens !== undefined && completionTokens !== undefined
-        ? promptTokens + completionTokens
-        : undefined,
-    ...(cachedTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {}),
-  };
-}
-
-function normalizeGoogleFinishReason(
-  finishReason: string | undefined,
-  hasToolCalls: boolean,
-): "stop" | "tool_calls" | "length" | "content_filter" | null {
-  if (!finishReason) {
-    return null;
-  }
-  if (finishReason === "STOP") {
-    return hasToolCalls ? "tool_calls" : "stop";
-  }
-  if (finishReason === "MAX_TOKENS") {
-    return "length";
-  }
-  if (["IMAGE_SAFETY", "RECITATION", "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"].includes(finishReason)) {
-    return "content_filter";
-  }
-  return null;
 }
 
 // The official OpenCode client sends these headers on every request. The Zen
@@ -2203,317 +1765,6 @@ async function streamOpenCodeResponse(
     }
     cancellation.dispose();
   }
-}
-
-class OpenCodeRequestError extends Error {
-  constructor(
-    message: string,
-    readonly userMessage: string = message,
-  ) {
-    super(message);
-    this.name = "OpenCodeRequestError";
-  }
-}
-
-interface ParsedApiError {
-  message?: string;
-  code?: string;
-  type?: string;
-  retryIn?: string;
-}
-
-interface RateLimitInfo {
-  retryAfterMs?: number;
-  resetAfterMs?: number;
-  requestLimit?: string;
-  requestRemaining?: string;
-  tokenLimit?: string;
-  tokenRemaining?: string;
-}
-
-function buildOpenCodeRequestError(
-  providerDisplayName: string,
-  response: Response,
-  rawDetail: string,
-  modelId: string | undefined,
-  payloadBytes: number,
-  capacityHint: string,
-): OpenCodeRequestError {
-  const apiError = parseApiError(rawDetail);
-  const rateLimitInfo = readRateLimitInfo(response.headers);
-  const modelHint = modelId ? ` model=${modelId}` : "";
-  const sizeHint = ` payloadBytes=${payloadBytes}`;
-  const apiMessage =
-    (apiError.message ?? rawDetail.trim()) || response.statusText;
-  const isLimit = isRateLimitResponse(response.status, apiError);
-
-  if (isLimit) {
-    const waitText =
-      apiError.retryIn ??
-      formatWaitText(rateLimitInfo.retryAfterMs ?? rateLimitInfo.resetAfterMs);
-    const quotaText = formatRateLimitSummary(rateLimitInfo);
-    const reason = classifyRateLimit(apiError, response.status);
-    const details = [
-      shouldIncludeApiMessage(apiMessage, reason) ? apiMessage : undefined,
-      waitText ? `Retry after ${waitText}.` : undefined,
-      quotaText ? `Quota: ${quotaText}.` : undefined,
-    ].filter((part): part is string => Boolean(part));
-    const userMessage =
-      `${providerDisplayName}: ${reason}${modelHint ? ` (${modelId})` : ""}. ${details.join(" ")}`.trim();
-    return new OpenCodeRequestError(
-      `${providerDisplayName} API rate/quota limit (${response.status})${modelHint}${sizeHint}: ${apiMessage}; ${quotaText || "no quota headers"}`,
-      userMessage,
-    );
-  }
-
-  const userMessage = `${providerDisplayName} API request failed (HTTP ${response.status})${modelHint ? ` for ${modelId}` : ""}: ${apiMessage}${capacityHint}`;
-  return new OpenCodeRequestError(
-    `${providerDisplayName} API request failed (${response.status})${modelHint}${sizeHint}${capacityHint}: ${apiMessage}`,
-    userMessage,
-  );
-}
-
-function parseApiError(rawDetail: string): ParsedApiError {
-  const fallback = rawDetail.trim();
-  if (!fallback) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(fallback) as unknown;
-    if (!isRecord(parsed)) {
-      return { message: fallback };
-    }
-
-    const error = isRecord(parsed.error) ? parsed.error : parsed;
-    return {
-      message: firstString(error.message, parsed.message, fallback),
-      code: firstString(error.code, parsed.code),
-      type: firstString(error.type, parsed.type),
-      retryIn: firstString(
-        error.retryIn,
-        parsed.retryIn,
-        error.retry_in,
-        parsed.retry_in,
-      ),
-    };
-  } catch {
-    return { message: fallback };
-  }
-}
-
-function readRateLimitInfo(headers: Headers): RateLimitInfo {
-  const retryAfter = firstHeader(headers, ["retry-after"]);
-  const requestLimit = firstHeader(headers, [
-    "x-ratelimit-limit-requests",
-    "anthropic-ratelimit-requests-limit",
-    "x-ratelimit-limit",
-    "ratelimit-limit",
-  ]);
-  const requestRemaining = firstHeader(headers, [
-    "x-ratelimit-remaining-requests",
-    "anthropic-ratelimit-requests-remaining",
-    "x-ratelimit-remaining",
-    "ratelimit-remaining",
-  ]);
-  const tokenLimit = firstHeader(headers, [
-    "x-ratelimit-limit-tokens",
-    "anthropic-ratelimit-tokens-limit",
-  ]);
-  const tokenRemaining = firstHeader(headers, [
-    "x-ratelimit-remaining-tokens",
-    "anthropic-ratelimit-tokens-remaining",
-  ]);
-  const reset = firstHeader(headers, [
-    "x-ratelimit-reset-requests",
-    "x-ratelimit-reset-tokens",
-    "anthropic-ratelimit-requests-reset",
-    "anthropic-ratelimit-tokens-reset",
-    "x-ratelimit-reset",
-    "ratelimit-reset",
-  ]);
-
-  return {
-    retryAfterMs: parseRetryAfter(retryAfter),
-    resetAfterMs: parseResetAfter(reset),
-    requestLimit,
-    requestRemaining,
-    tokenLimit,
-    tokenRemaining,
-  };
-}
-
-function formatRateLimitSummary(info: RateLimitInfo): string | undefined {
-  const parts = [
-    info.requestRemaining || info.requestLimit
-      ? `requests remaining=${info.requestRemaining ?? "?"}${info.requestLimit ? `/${info.requestLimit}` : ""}`
-      : undefined,
-    info.tokenRemaining || info.tokenLimit
-      ? `tokens remaining=${info.tokenRemaining ?? "?"}${info.tokenLimit ? `/${info.tokenLimit}` : ""}`
-      : undefined,
-    info.retryAfterMs !== undefined
-      ? `retry-after=${formatDuration(info.retryAfterMs)}`
-      : undefined,
-    info.resetAfterMs !== undefined
-      ? `reset=${formatDuration(info.resetAfterMs)}`
-      : undefined,
-  ].filter((part): part is string => Boolean(part));
-
-  return parts.length ? parts.join("; ") : undefined;
-}
-
-function classifyRateLimit(apiError: ParsedApiError, status: number): string {
-  const code =
-    `${apiError.code ?? ""} ${apiError.type ?? ""} ${apiError.message ?? ""}`.toLowerCase();
-  const compactCode = compactErrorCode(code);
-  if (compactCode.includes("gosubscriptionrollinglimitexceeded")) {
-    return "5-hour OpenCode Go usage limit reached";
-  }
-  if (compactCode.includes("gosubscriptionweeklylimitexceeded")) {
-    return "weekly OpenCode Go usage limit reached";
-  }
-  if (compactCode.includes("gosubscriptionmonthlylimitexceeded")) {
-    return "monthly OpenCode Go usage limit reached";
-  }
-  if (code.includes("subscriptionquota") || code.includes("quota")) {
-    return "OpenCode quota exceeded";
-  }
-  return status === 429
-    ? "rate limit exceeded"
-    : "OpenCode usage limit reached";
-}
-
-function isRateLimitResponse(
-  status: number,
-  apiError: ParsedApiError,
-): boolean {
-  const code =
-    `${apiError.code ?? ""} ${apiError.type ?? ""} ${apiError.message ?? ""}`.toLowerCase();
-  const compactCode = compactErrorCode(code);
-  return (
-    status === 429 ||
-    compactCode.includes("ratelimit") ||
-    code.includes("rate_limit") ||
-    code.includes("quota") ||
-    compactCode.includes("limitexceeded")
-  );
-}
-
-function compactErrorCode(value: string): string {
-  return value.replace(/[^a-z0-9]/g, "");
-}
-
-function shouldIncludeApiMessage(apiMessage: string, reason: string): boolean {
-  const normalizedMessage = compactErrorCode(apiMessage.toLowerCase());
-  const normalizedReason = compactErrorCode(reason.toLowerCase());
-  return (
-    Boolean(normalizedMessage) &&
-    !normalizedMessage.startsWith(normalizedReason)
-  );
-}
-
-function firstHeader(headers: Headers, names: string[]): string | undefined {
-  for (const name of names) {
-    const value = headers.get(name);
-    if (value?.trim()) {
-      return value.trim();
-    }
-  }
-  return undefined;
-}
-
-function firstString(...values: unknown[]): string | undefined {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return undefined;
-}
-
-function parseRetryAfter(value: string | undefined): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return seconds * 1000;
-  }
-  const dateMs = Date.parse(value);
-  return Number.isFinite(dateMs)
-    ? Math.max(0, dateMs - Date.now())
-    : parseDurationLike(value);
-}
-
-function parseResetAfter(value: string | undefined): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric >= 0) {
-    if (numeric > 1_000_000_000_000) {
-      return Math.max(0, numeric - Date.now());
-    }
-    if (numeric > 1_000_000_000) {
-      return Math.max(0, numeric * 1000 - Date.now());
-    }
-    return numeric * 1000;
-  }
-  const durationMs = parseDurationLike(value);
-  if (durationMs !== undefined) {
-    return durationMs;
-  }
-  return parseRetryAfter(value);
-}
-
-function parseDurationLike(value: string): number | undefined {
-  const matches = value
-    .trim()
-    .toLowerCase()
-    .matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h)/g);
-  let totalMs = 0;
-  let found = false;
-  for (const match of matches) {
-    found = true;
-    const amount = Number(match[1]);
-    const unit = match[2];
-    if (!Number.isFinite(amount)) {
-      continue;
-    }
-    if (unit === "ms") {
-      totalMs += amount;
-    } else if (unit === "s") {
-      totalMs += amount * 1000;
-    } else if (unit === "m") {
-      totalMs += amount * 60 * 1000;
-    } else if (unit === "h") {
-      totalMs += amount * 60 * 60 * 1000;
-    }
-  }
-  return found ? Math.max(0, Math.ceil(totalMs)) : undefined;
-}
-
-function formatWaitText(value: number | undefined): string | undefined {
-  return value === undefined ? undefined : formatDuration(value);
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours) {
-    return `${hours}h ${minutes}m`;
-  }
-  if (minutes) {
-    return `${minutes}m ${seconds}s`;
-  }
-  return `${seconds}s`;
-}
-
-function truncateForLog(value: string, max = 1200): string {
-  const collapsed = value.replace(/\s+/g, " ").trim();
-  return collapsed.length > max ? `${collapsed.slice(0, max)}… (+${collapsed.length - max} chars)` : collapsed;
 }
 
 function parseServerSentEvent(
@@ -3275,12 +2526,6 @@ function positiveOverride(value: number): number | undefined {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
-function positiveNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
-    : undefined;
-}
-
 function modelCapabilities(metadata: ResolvedModelMetadata): CopilotCompatibleCapabilities {
   const supportsVision = metadata.supportsVision;
   return {
@@ -3289,178 +2534,6 @@ function modelCapabilities(metadata: ResolvedModelMetadata): CopilotCompatibleCa
     supportsImageToText: supportsVision,
     supportsToolCalling: true
   };
-}
-
-function resolveModelRouting(modelId: string, provider: ProviderDefinition): ModelRoutingFields {
-  if (provider.vendor === ZEN_VENDOR && /^gpt-/i.test(modelId)) {
-    return {
-      endpointKind: "responses",
-      endpointUrl: provider.responsesUrl ?? provider.chatCompletionsUrl,
-      sdkPackage: "@ai-sdk/openai",
-    };
-  }
-
-  if (/^claude-/i.test(modelId) || (provider.vendor === GO_VENDOR && /^minimax-m2\./i.test(modelId))) {
-    return {
-      endpointKind: "messages",
-      endpointUrl: provider.messagesUrl,
-      sdkPackage: "@ai-sdk/anthropic",
-    };
-  }
-
-  if (provider.vendor === ZEN_VENDOR && /^gemini-/i.test(modelId)) {
-    return {
-      endpointKind: "google",
-      endpointUrl: `${provider.modelsUrl}/${modelId}`,
-      sdkPackage: "@ai-sdk/google",
-    };
-  }
-
-  return {
-    endpointKind: "chat-completions",
-    endpointUrl: provider.chatCompletionsUrl,
-    sdkPackage: "@ai-sdk/openai-compatible",
-  };
-}
-
-function toEffectiveModelId(modelId: string, vendor: ProviderDefinition["vendor"]): string {
-  return `${vendor}:${modelId}::${MODEL_METADATA_REVISION}`;
-}
-
-function bundledModelMetadataSnapshot(): CachedModelMetadataSnapshot {
-  return {
-    fetchedAt: 0,
-    providers: {
-      [GO_VENDOR]: bundledModelMetadataForProvider(GO_VENDOR),
-      [ZEN_VENDOR]: bundledModelMetadataForProvider(ZEN_VENDOR),
-    },
-  };
-}
-
-function bundledModelMetadataForProvider(
-  vendor: ProviderDefinition["vendor"],
-): Record<string, ModelMetadataFields> {
-  return Object.fromEntries(
-    Object.keys(MODEL_LIMITS_BY_PROVIDER[vendor]).flatMap((modelId) => {
-      const metadata = fallbackModelMetadata(modelId, vendor);
-      return metadata ? [[modelId, metadata] as const] : [];
-    }),
-  );
-}
-
-function fallbackModelMetadata(
-  modelId: string,
-  vendor: ProviderDefinition["vendor"],
-): ModelMetadataFields | undefined {
-  const limits = MODEL_LIMITS_BY_PROVIDER[vendor][modelId];
-  const supportsVision = VISION_CAPABLE_MODELS.has(modelId);
-  const status =
-    vendor === ZEN_VENDOR && modelId === "minimax-m2.5-free"
-      ? "deprecated"
-      : undefined;
-
-  if (!limits && !supportsVision && !status && !thinkingFamily(modelId)) {
-    return undefined;
-  }
-
-  return {
-    contextWindow: limits?.contextWindow,
-    maxOutputTokens: limits?.maxOutputTokens,
-    supportsVision: supportsVision || undefined,
-    reasoning: Boolean(thinkingFamily(modelId)) || undefined,
-    status,
-  };
-}
-
-function normalizeModelsDevSnapshot(
-  data: ModelsDevResponse,
-): CachedModelMetadataSnapshot {
-  return {
-    fetchedAt: Date.now(),
-    providers: {
-      [GO_VENDOR]: normalizeModelsDevProvider(
-        data[MODELS_DEV_PROVIDER_BY_VENDOR[GO_VENDOR]]?.models ?? {},
-      ),
-      [ZEN_VENDOR]: normalizeModelsDevProvider(
-        data[MODELS_DEV_PROVIDER_BY_VENDOR[ZEN_VENDOR]]?.models ?? {},
-      ),
-    },
-  };
-}
-
-function normalizeModelsDevProvider(
-  models: Record<string, ModelsDevModelRecord>,
-): Record<string, ModelMetadataFields> {
-  const normalized: Record<string, ModelMetadataFields> = {};
-
-  for (const [modelId, model] of Object.entries(models)) {
-    const metadata = normalizeModelMetadataFields({
-      contextWindow: positiveNumber(model.limit?.context),
-      maxOutputTokens: positiveNumber(model.limit?.output),
-      supportsVision: detectVisionSupport(model.modalities, model.attachment),
-      reasoning:
-        typeof model.reasoning === "boolean" ? model.reasoning : undefined,
-      status: typeof model.status === "string" ? model.status : undefined,
-    });
-
-    if (metadata) {
-      normalized[modelId] = metadata;
-    }
-  }
-
-  return normalized;
-}
-
-function normalizeLiveModelMetadata(
-  model: ModelListEntry,
-): ModelMetadataFields | undefined {
-  return normalizeModelMetadataFields({
-    contextWindow: positiveNumber(
-      model.contextWindow ?? model.context_window ?? model.limit?.context,
-    ),
-    maxOutputTokens: positiveNumber(
-      model.maxOutputTokens ?? model.max_output_tokens ?? model.limit?.output,
-    ),
-    supportsVision: detectVisionSupport(
-      model.modalities,
-      model.imageInput ?? model.image_input ?? model.attachment,
-    ),
-    reasoning:
-      typeof model.reasoning === "boolean" ? model.reasoning : undefined,
-    status: model.deprecated
-      ? "deprecated"
-      : typeof model.status === "string"
-        ? model.status
-        : undefined,
-  });
-}
-
-function normalizeModelMetadataFields(
-  metadata: ModelMetadataFields,
-): ModelMetadataFields | undefined {
-  if (
-    metadata.contextWindow === undefined &&
-    metadata.maxOutputTokens === undefined &&
-    metadata.supportsVision === undefined &&
-    metadata.reasoning === undefined &&
-    metadata.status === undefined
-  ) {
-    return undefined;
-  }
-  return metadata;
-}
-
-function detectVisionSupport(
-  modalities: { input?: string[]; output?: string[] } | undefined,
-  attachmentHint: boolean | undefined,
-): boolean | undefined {
-  const inputModalities = Array.isArray(modalities?.input)
-    ? modalities.input
-    : undefined;
-  if (inputModalities?.length) {
-    return inputModalities.some((modality) => modality !== "text");
-  }
-  return typeof attachmentHint === "boolean" ? attachmentHint : undefined;
 }
 
 function shouldHideDeprecatedModel(
@@ -3485,10 +2558,6 @@ function resolveRawModelId(modelId: string): string {
     return base.slice(zenPrefix.length);
   }
   return base;
-}
-
-function hasExplicitModelLimits(modelId: string, vendor: ProviderDefinition["vendor"]): boolean {
-  return Boolean(fallbackModelMetadata(modelId, vendor));
 }
 
 function isFreeZenModel(modelId: string): boolean {

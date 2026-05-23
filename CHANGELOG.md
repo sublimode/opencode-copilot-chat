@@ -14,6 +14,11 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 - Added a TTL-cached models.dev metadata snapshot, merged with live `/models` metadata and a bundled fallback catalog for offline picker registration.
 - Added native Zen GPT routing through `/responses` and Zen Gemini routing through the documented Google-style `/models/{model}:streamGenerateContent?alt=sse` endpoint.
 
+### Changed
+
+- Corrected fallback-advertised model limits to follow `models.dev` whenever the live `/models` payload does not provide limit metadata, fixing earlier Go/Zen cross-provider mix-ups in the bundled table.
+- This reduces several previously overstated fallback values, notably `deepseek-v4-flash-free` to `200000 / 128000`, `glm-5` and `glm-5.1` to `202752 / 32768`, and Go `minimax-m2.5` to `204800 / 65536`.
+
 ### Fixed
 
 - Updated bundled fallback limits and capability hints so the picker stays usable when neither `/models` nor models.dev can be refreshed.
