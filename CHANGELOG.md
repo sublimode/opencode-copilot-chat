@@ -10,7 +10,6 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 - Persist recent diagnostics request summaries in VS Code global state so the request history survives extension host reloads and can be reused if VS Code later exposes richer BYOK debug surfaces.
 - Added a usage status bar summary with prompt/output/total/cache data after each OpenCode response.
 - Added OpenCode usage DataPart emission so later Copilot Chat integrations can consume normalized prompt/output/cache metadata without re-parsing raw transport logs.
-- Added explicit follow-up TODO tracking in-repo for the next BYOK integration slices, including the experimental context-indicator hook.
 - Added an opt-in experimental context-indicator hook that can inject real BYOK usage into the Copilot Chat footer using VS Code internals.
 
 ### Changed
@@ -19,6 +18,14 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 - Keep capturing request usage and finish metadata even when VS Code's native Agent Debug Log does not surface custom BYOK provider telemetry.
 - Enriched OpenCode output logging with normalized usage lines, finish reasons, and cache hit ratio when the upstream provider reports cache metadata.
 - Route provider progress and usage through a local request-id bridge so the experimental context hook can bind real request usage back to VS Code's internal chat request ids.
+- Simplified the Anthropic `/messages` request builder by removing dead branches and consolidating repeated text extraction helpers after the qwen3.7 transport fix.
+- Refreshed the bundled fallback catalogs to match the current OpenCode Go catalog and the current free/paid Zen catalogs.
+
+### Fixed
+
+- Fixed OpenCode `/messages` authentication to follow the gateway contract (`x-api-key` for Anthropic-style routes, bearer auth for OpenAI-style routes), which restores OpenCode Go `qwen3.7-max` in Copilot Chat.
+- Fixed the OpenCode `/messages` body builder to emit Anthropic-compatible message blocks instead of forwarding OpenAI-shaped payloads to that endpoint.
+- Logged raw HTTP error bodies in the OpenCode output channel so provider-specific backend failures can be diagnosed without reproducing requests manually.
 
 ## [0.1.6] — 2026-05-21
 

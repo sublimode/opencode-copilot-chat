@@ -22,7 +22,8 @@ export function resolveModelRouting(
 
   if (
     /^claude-/i.test(modelId) ||
-    (provider.vendor === GO_VENDOR && /^minimax-m2\./i.test(modelId))
+    (provider.vendor === GO_VENDOR &&
+      (/^minimax-m2\./i.test(modelId) || /^qwen3\.7-max$/i.test(modelId)))
   ) {
     return {
       endpointKind: "messages",

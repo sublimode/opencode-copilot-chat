@@ -16,8 +16,8 @@ This lets you pick and use OpenCode models directly from the Copilot Chat model 
 
 | Provider | Cost | Example Models |
 |---|---|---|
-| **OpenCode Go** | Paid (top-up) | DeepSeek V4, Kimi K2.6, MiniMax M2.7, GLM-5.1, MiMo V2.5, Qwen3.6 |
-| **OpenCode Zen** | Free | DeepSeek V4 Flash Free, MiniMax M2.5 Free, Nemotron 3 Super Free, Big Pickle |
+| **OpenCode Go** | Paid (top-up) | DeepSeek V4, Kimi K2.6, MiniMax M2.7, GLM-5.1, MiMo V2.5, Qwen3.7 Max |
+| **OpenCode Zen** | Free or paid | DeepSeek V4 Flash Free, GPT 5.5, Claude Opus 4.7, Grok Build, Big Pickle |
 
 ---
 
@@ -28,7 +28,7 @@ This lets you pick and use OpenCode models directly from the Copilot Chat model 
 - **TTL-cached metadata** — merges live `/models` metadata with a 6-hour models.dev snapshot to resolve context window, output limits, image support, and deprecation state
 - **Bundled fallback** — keeps the picker usable offline with an internal fallback catalog when live metadata cannot be refreshed yet
 - **Tool-calling support** — forwards tool schemas using the request shape each routed model family expects
-- **Native transport compatibility** — routes Zen GPT to `/responses`, Zen Gemini to the documented Google-style endpoint, Zen Claude to `/messages`, Go MiniMax to `/messages`, and the remaining models to `/chat/completions`
+- **Native transport compatibility** — routes Zen GPT to `/responses`, Zen Gemini to the documented Google-style endpoint, Zen Claude to `/messages`, Go MiniMax and Qwen3.7 Max to `/messages`, and the remaining models to `/chat/completions`
 - **Safer requests** — adds sticky routing headers plus request and stream idle timeouts with clearer rate-limit/quota errors in VS Code
 - **Diagnostics command** — one-click markdown report showing exactly which models VS Code has registered plus recent request summaries for transport, tokens, latency, and errors
 - **Usage status bar** — shows the latest prompt/output/total/cache summary after each OpenCode response
@@ -109,7 +109,7 @@ https://opencode.ai/zen/go/v1/models   (OpenCode Go — paid)
 https://opencode.ai/zen/v1/models       (OpenCode Zen — free)
 ```
 
-The **Go provider** exposes all OpenCode Go models. The **Zen provider** filters the live Zen list to free models (`*-free` plus `big-pickle`) by default. Set `opencodego.freeOnly` to `false` to include paid Zen models in the picker.
+The **Go provider** exposes all OpenCode Go models. The **Zen provider** filters the live Zen list to free models (`*-free` plus `big-pickle`) by default. Set `opencodego.freeOnly` to `false` to include the paid Zen catalog in the picker. The bundled fallback catalog mirrors the current Go catalog and both the free and paid Zen catalogs so offline registration stays closer to the live service.
 
 Model limits and capabilities are resolved in this order:
 
@@ -130,6 +130,7 @@ Limits are taken from the current [models.dev](https://models.dev) registry when
 | Model | Context window | Max output tokens |
 |---|---:|---:|
 | `deepseek-v4-pro` / `deepseek-v4-flash` | 1,000,000 | 384,000 |
+| `qwen3.7-max` | 1,000,000 | 65,536 |
 | `mimo-v2.5-pro` / `mimo-v2-pro` | 1,048,576 | 128,000 |
 | `mimo-v2.5` | 1,000,000 | 128,000 |
 | `kimi-k2.6` | 262,144 | 65,536 |
@@ -142,13 +143,22 @@ Limits are taken from the current [models.dev](https://models.dev) registry when
 | `glm-5.1` | 202,752 | 32,768 |
 | `glm-5` | 202,752 | 32,768 |
 
-**OpenCode Zen (free models)**
+**OpenCode Zen (selected fallback entries)**
 
 | Model | Context window | Max output tokens |
 |---|---:|---:|
+| `claude-opus-4-7` / `claude-opus-4-6` | 1,000,000 | 128,000 |
+| `claude-sonnet-4-6` / `claude-sonnet-4-5` / `claude-sonnet-4` | 1,000,000 | 64,000 |
+| `gpt-5.5` / `gpt-5.5-pro` / `gpt-5.4` / `gpt-5.4-pro` | 1,050,000 | 128,000 |
+| `gpt-5.4-mini` / `gpt-5.4-nano` / `gpt-5.3-codex` / `gpt-5.2` / `gpt-5.2-codex` / `gpt-5.1*` / `gpt-5*` | 400,000 | 128,000 |
+| `gpt-5.3-codex-spark` | 128,000 | 128,000 |
+| `gemini-3.5-flash` / `gemini-3.1-pro` / `gemini-3-flash` | 1,048,576 | 65,536 |
+| `grok-build-0.1` | 256,000 | 256,000 |
+| `glm-5` / `glm-5.1` | 204,800 | 131,072 |
+| `kimi-k2.6` / `kimi-k2.5` | 262,144 | 65,536 |
+| `minimax-m2.7` / `minimax-m2.5` / `minimax-m2.5-free` | 204,800 | 131,072 |
+| `qwen3.6-plus` / `qwen3.6-plus-free` / `qwen3.5-plus` | 262,144 | 65,536 |
 | `deepseek-v4-flash-free` | 200,000 | 128,000 |
-| `qwen3.6-plus-free` | 262,144 | 65,536 |
-| `minimax-m2.5-free` | 204,800 | 131,072 |
 | `nemotron-3-super-free` | 204,800 | 128,000 |
 | `big-pickle` | 200,000 | 128,000 |
 
@@ -166,6 +176,7 @@ https://opencode.ai/zen/v1/chat/completions       (Zen)
 The extension also routes these families automatically:
 
 - OpenCode Go MiniMax M2 models (`minimax-m2.*`) → `/messages`
+- OpenCode Go Qwen3.7 Max (`qwen3.7-max`) → `/messages`
 - OpenCode Zen Claude models (`claude-*`) → `/messages`
 - OpenCode Zen GPT models (`gpt-*`) → `/responses`
 - OpenCode Zen Gemini models (`gemini-*`) → `/models/{model}:streamGenerateContent?alt=sse`
@@ -177,7 +188,7 @@ https://opencode.ai/zen/v1/responses
 https://opencode.ai/zen/v1/models/gemini-3.5-flash:streamGenerateContent?alt=sse
 ```
 
-Qwen chat models remain on `/chat/completions` with the hybrid stream parser already used by the extension, preserving the working tool/reasoning behavior from previous releases.
+Current Go Qwen 3.5 and 3.6 models remain on `/chat/completions`. Go `qwen3.7-max` follows the documented `/messages` route and uses the Anthropic-compatible request shape expected by the OpenCode gateway.
 
 ---
 

@@ -19,10 +19,10 @@ import {
 import {
   resolveModelRouting,
 } from "./routing";
+import { buildOpenCodeGatewayAuthHeaders } from "./openCodeAuth";
 import {
   streamAnthropicMessages as runStreamAnthropicMessages,
   streamChatCompletions as runStreamChatCompletions,
-  streamChatCompletionsWithAnthropicStream as runStreamChatCompletionsWithAnthropicStream,
   streamGoogleGenerateContent as runStreamGoogleGenerateContent,
   streamResponsesApi as runStreamResponsesApi,
   type TransportRequestSummary,
@@ -88,22 +88,22 @@ const PROVIDERS: Record<ProviderDefinition["vendor"], ProviderDefinition> = {
     categoryOrder: 2,
     testModelId: "deepseek-v4-flash",
     fallbackModels: [
-      "minimax-m2.7",
-      "minimax-m2.5",
-      "kimi-k2.6",
-      "kimi-k2.5",
-      "glm-5.1",
-      "glm-5",
       "deepseek-v4-pro",
       "deepseek-v4-flash",
-      "qwen3.6-plus",
-      "qwen3.6-plus-free",
-      "qwen3.5-plus",
-      "mimo-v2-pro",
+      "glm-5.1",
+      "glm-5",
+      "hy3-preview",
+      "kimi-k2.6",
+      "kimi-k2.5",
       "mimo-v2-omni",
-      "mimo-v2.5-pro",
+      "mimo-v2-pro",
       "mimo-v2.5",
-      "hy3-preview"
+      "mimo-v2.5-pro",
+      "minimax-m2.7",
+      "minimax-m2.5",
+      "qwen3.7-max",
+      "qwen3.6-plus",
+      "qwen3.5-plus",
     ]
   },
   [ZEN_VENDOR]: {
@@ -117,10 +117,47 @@ const PROVIDERS: Record<ProviderDefinition["vendor"], ProviderDefinition> = {
     categoryOrder: 3,
     testModelId: "deepseek-v4-flash-free",
     fallbackModels: [
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-opus-4-1",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-sonnet-4",
+      "claude-haiku-4-5",
       "deepseek-v4-flash-free",
+      "gemini-3.5-flash",
+      "gemini-3.1-pro",
+      "gemini-3-flash",
+      "glm-5.1",
+      "glm-5",
+      "gpt-5.5",
+      "gpt-5.5-pro",
+      "gpt-5.4",
+      "gpt-5.4-pro",
+      "gpt-5.4-mini",
+      "gpt-5.4-nano",
+      "gpt-5.3-codex",
+      "gpt-5.3-codex-spark",
+      "gpt-5.2",
+      "gpt-5.2-codex",
+      "gpt-5.1",
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-mini",
+      "gpt-5",
+      "gpt-5-codex",
+      "gpt-5-nano",
+      "grok-build-0.1",
+      "kimi-k2.6",
+      "kimi-k2.5",
+      "minimax-m2.7",
+      "minimax-m2.5",
       "minimax-m2.5-free",
       "nemotron-3-super-free",
+      "qwen3.6-plus",
       "qwen3.6-plus-free",
+      "qwen3.5-plus",
       "big-pickle"
     ],
     filterModel: (modelId) => vscode.workspace.getConfiguration("opencodego").get("freeOnly", true) ? modelId.endsWith("-free") || FREE_ZEN_MODEL_IDS.has(modelId) : true
@@ -305,6 +342,63 @@ interface AnthropicToolDefinition {
   description: string;
   input_schema: object;
 }
+
+interface AnthropicCacheControl {
+  type: "ephemeral";
+}
+
+interface AnthropicTextBlock {
+  type: "text";
+  text: string;
+  cache_control?: AnthropicCacheControl;
+}
+
+interface AnthropicImageSourceUrl {
+  type: "url";
+  url: string;
+}
+
+interface AnthropicImageSourceBase64 {
+  type: "base64";
+  media_type: string;
+  data: string;
+}
+
+type AnthropicImageSource = AnthropicImageSourceUrl | AnthropicImageSourceBase64;
+
+interface AnthropicImageBlock {
+  type: "image";
+  source: AnthropicImageSource;
+  cache_control?: AnthropicCacheControl;
+}
+
+interface AnthropicToolUseBlock {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+  cache_control?: AnthropicCacheControl;
+}
+
+interface AnthropicToolResultBlock {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+  cache_control?: AnthropicCacheControl;
+}
+
+type AnthropicContentBlock =
+  | AnthropicTextBlock
+  | AnthropicImageBlock
+  | AnthropicToolUseBlock
+  | AnthropicToolResultBlock;
+
+interface AnthropicRequestMessage {
+  role: "user" | "assistant";
+  content: AnthropicContentBlock[];
+}
+
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 interface RecentTransportSummary extends TransportRequestSummary {
   recordedAt: string;
@@ -944,11 +1038,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           requestTimeoutMs: settings.requestTimeoutMs,
           streamIdleTimeoutMs: settings.streamIdleTimeoutMs,
           contextWindowOutputBuffer,
-          authHeaders: {
-            Authorization: `Bearer ${apiKey}`,
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01"
-          },
+          authHeaders: buildOpenCodeGatewayAuthHeaders("messages", apiKey),
           capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
           onTransportSummary,
         });
@@ -962,6 +1052,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           apiKey,
           modelId: rawModelId,
           body: buildResponsesRequestBody(rawModelId, apiMessages, options, settings, limits),
+          authHeaders: buildOpenCodeGatewayAuthHeaders("responses", apiKey),
           requestHeaders,
           progress,
           token,
@@ -997,10 +1088,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           requestTimeoutMs: settings.requestTimeoutMs,
           streamIdleTimeoutMs: settings.streamIdleTimeoutMs,
           contextWindowOutputBuffer,
-          authHeaders: {
-            Authorization: `Bearer ${apiKey}`,
-            "x-goog-api-key": apiKey
-          },
+          authHeaders: buildOpenCodeGatewayAuthHeaders("google", apiKey),
           capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
           onTransportSummary,
           onReasoningContent: (toolCallIds, reasoningContent) => {
@@ -1012,34 +1100,13 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         return;
       }
 
-      if (isQwenModel(rawModelId)) {
-        await runStreamChatCompletionsWithAnthropicStream({
-          url: routing.endpointUrl,
-          providerDisplayName: this.definition.displayName,
-          apiKey,
-          modelId: rawModelId,
-          body: buildChatCompletionsRequestBody(rawModelId, apiMessages, options, settings, limits),
-          requestHeaders,
-          progress,
-          token,
-          output: outputChannel,
-          debugReasoning: settings.debugReasoning,
-          requestTimeoutMs: settings.requestTimeoutMs,
-          streamIdleTimeoutMs: settings.streamIdleTimeoutMs,
-          contextWindowOutputBuffer,
-          capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
-          onTransportSummary,
-        });
-        this.log(`Request completed: model=${model.id}`);
-        return;
-      }
-
       await runStreamChatCompletions({
         url: routing.endpointUrl,
         providerDisplayName: this.definition.displayName,
         apiKey,
         modelId: rawModelId,
         body: buildChatCompletionsRequestBody(rawModelId, apiMessages, options, settings, limits),
+        authHeaders: buildOpenCodeGatewayAuthHeaders("chat-completions", apiKey),
         requestHeaders,
         progress,
         token,
@@ -1245,18 +1312,162 @@ function buildAnthropicMessagesRequestBody(
 ): Record<string, unknown> {
   const tools = mapAnthropicTools(options.tools);
   const thinkingPayload = buildThinkingPayload(modelId, settings.thinking, messagesHaveImages(messages));
+  const anthropicMessages = buildAnthropicMessages(messages);
 
   return {
     model: modelId,
-    messages,
     temperature: settings.temperature,
     max_tokens: limits.maxOutputTokens,
     stream: true,
+    messages: anthropicMessages,
     ...thinkingPayload,
     ...(tools.length
       ? { tools, tool_choice: anthropicToolChoice(options.toolMode) }
       : {}),
   };
+}
+
+function buildAnthropicMessages(messages: ApiMessage[]): AnthropicRequestMessage[] {
+  let cacheControlCount = 0;
+  const nextCacheControl = (): { cache_control?: AnthropicCacheControl } => {
+    cacheControlCount += 1;
+    return cacheControlCount <= 4
+      ? { cache_control: { type: "ephemeral" } }
+      : {};
+  };
+
+  const anthropicMessages: AnthropicRequestMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      const userBlocks = anthropicUserBlocks(message.content, nextCacheControl);
+      if (userBlocks.length) {
+        anthropicMessages.push({ role: "user", content: userBlocks });
+      }
+      continue;
+    }
+
+    if (message.role === "assistant") {
+      const assistantBlocks = anthropicAssistantBlocks(message, nextCacheControl);
+      if (assistantBlocks.length) {
+        anthropicMessages.push({ role: "assistant", content: assistantBlocks });
+      }
+      continue;
+    }
+
+    if (message.role === "tool" && message.tool_call_id) {
+      anthropicMessages.push({
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: message.tool_call_id,
+          content: joinedTextContent(message.content, "\n"),
+          ...nextCacheControl(),
+        }],
+      });
+    }
+  }
+
+  if (!anthropicMessages.length) {
+    anthropicMessages.push({
+      role: "user",
+      content: [{ type: "text", text: "Continue the conversation.", ...nextCacheControl() }],
+    });
+  }
+
+  return anthropicMessages;
+}
+
+function anthropicUserBlocks(
+  content: ApiMessage["content"],
+  nextCacheControl: () => { cache_control?: AnthropicCacheControl },
+): AnthropicContentBlock[] {
+  if (typeof content === "string") {
+    return content.trim()
+      ? [{ type: "text", text: content, ...nextCacheControl() }]
+      : [];
+  }
+
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  const blocks: AnthropicContentBlock[] = [];
+  for (const part of content) {
+    if (part.type === "text" && typeof part.text === "string" && part.text.length > 0) {
+      blocks.push({ type: "text", text: part.text, ...nextCacheControl() });
+      continue;
+    }
+
+    if (part.type === "image_url") {
+      const source = anthropicImageSource(part);
+      if (source) {
+        blocks.push({ type: "image", source, ...nextCacheControl() });
+      }
+    }
+  }
+
+  return blocks;
+}
+
+function anthropicAssistantBlocks(
+  message: ApiMessage,
+  nextCacheControl: () => { cache_control?: AnthropicCacheControl },
+): AnthropicContentBlock[] {
+  const blocks: AnthropicContentBlock[] = [];
+
+  const text = joinedTextContent(message.content);
+  if (text) {
+    blocks.push({ type: "text", text, ...nextCacheControl() });
+  }
+
+  for (const toolCall of message.tool_calls ?? []) {
+    blocks.push({
+      type: "tool_use",
+      id: toolCall.id || `toolu_${Math.random().toString(36).slice(2)}`,
+      name: toolCall.function.name,
+      input: anthropicToolCallInput(toolCall.function.arguments),
+      ...nextCacheControl(),
+    });
+  }
+
+  return blocks;
+}
+
+function anthropicToolCallInput(argumentsText: string): unknown {
+  if (!argumentsText.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(argumentsText);
+  } catch {
+    return argumentsText;
+  }
+}
+
+function anthropicImageSource(
+  part: OpenAiContentPart,
+): AnthropicImageSource | undefined {
+  if (part.type !== "image_url") {
+    return undefined;
+  }
+
+  const url = part.image_url?.url;
+  if (typeof url !== "string" || !url) {
+    return undefined;
+  }
+
+  const match = /^data:([^;]+);base64,(.*)$/i.exec(url);
+  if (match) {
+    return {
+      type: "base64",
+      media_type: match[1],
+      data: match[2],
+    };
+  }
+
+  return { type: "url", url };
 }
 
 function mapResponsesTools(tools: readonly vscode.LanguageModelChatTool[] | undefined): Array<Record<string, unknown>> {
@@ -1351,6 +1562,13 @@ function responsesUserContent(content: ApiMessage["content"]): Array<Record<stri
 }
 
 function responsesAssistantText(content: ApiMessage["content"]): string {
+  return joinedTextContent(content);
+}
+
+function joinedTextContent(
+  content: ApiMessage["content"],
+  separator = "",
+): string {
   if (typeof content === "string") {
     return content;
   }
@@ -1362,7 +1580,7 @@ function responsesAssistantText(content: ApiMessage["content"]): string {
   return content
     .filter((part): part is OpenAiContentPart & { text: string } => part.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
-    .join("");
+    .join(separator);
 }
 
 function buildGoogleGenerateContentBody(
@@ -1782,7 +2000,21 @@ function convertMessage(
 }
 
 function dataPartToBase64(data: Uint8Array): string {
-  return Buffer.from(data).toString("base64");
+  let output = "";
+
+  for (let index = 0; index < data.length; index += 3) {
+    const first = data[index] ?? 0;
+    const second = data[index + 1] ?? 0;
+    const third = data[index + 2] ?? 0;
+    const chunk = (first << 16) | (second << 8) | third;
+
+    output += BASE64_ALPHABET[(chunk >> 18) & 63];
+    output += BASE64_ALPHABET[(chunk >> 12) & 63];
+    output += index + 1 < data.length ? BASE64_ALPHABET[(chunk >> 6) & 63] : "=";
+    output += index + 2 < data.length ? BASE64_ALPHABET[chunk & 63] : "=";
+  }
+
+  return output;
 }
 
 function reasoningForToolCalls(
@@ -2121,10 +2353,6 @@ function buildThinkingPayload(modelId: string, thinking: ThinkingSettings, hasIm
   }
 
   return {};
-}
-
-function isQwenModel(modelId: string): boolean {
-  return /^qwen3(?:\.|-)/i.test(modelId);
 }
 
 function modelLimits(

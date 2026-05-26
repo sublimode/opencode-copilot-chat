@@ -94,46 +94,6 @@ export async function streamChatCompletions(
   }
 }
 
-export async function streamChatCompletionsWithAnthropicStream(
-  options: StreamRequestOptions,
-): Promise<void> {
-  const openAiExtractor = new OpenAiResponseExtractor(
-    undefined,
-    createReasoningDebugger(options.output, options.debugReasoning),
-  );
-  const anthropicExtractor = new AnthropicResponseExtractor();
-
-  await streamOpenCodeResponse({
-    ...options,
-    extractStreamParts: (data) => {
-      const openAiParts = openAiExtractor.extractStreamParts(data);
-      return openAiParts.length
-        ? openAiParts
-        : anthropicExtractor.extractStreamParts(data);
-    },
-    extractFullParts: (data) => {
-      const openAiParts = extractChatCompletionParts(data);
-      return openAiParts.length ? openAiParts : extractAnthropicParts(data);
-    },
-  });
-
-  openAiExtractor.flushReasoningFallback(
-    options.progress,
-    options.requestHeaders["x-opencode-request"],
-  );
-  const emittedText =
-    openAiExtractor.emittedText + anthropicExtractor.emittedText;
-  options.output?.appendLine(
-    `[stream-summary model=${options.modelId}] textChars=${emittedText} toolCalls=${openAiExtractor.emittedTools} reasoningChars=${openAiExtractor.reasoningChars}`,
-  );
-  if (emittedText === 0 && openAiExtractor.emittedTools === 0) {
-    options.output?.appendLine(
-      `[warn] empty response from model=${options.modelId} after hybrid Qwen stream parsing. Enable opencodego.debugReasoning to inspect raw SSE.`,
-    );
-    options.output?.show(true);
-  }
-}
-
 export async function streamAnthropicMessages(
   options: StreamRequestOptions,
 ): Promise<void> {
@@ -380,6 +340,9 @@ async function streamOpenCodeResponse(
 
     if (!response.ok) {
       const detail = await response.text();
+      options.output?.appendLine(
+        `[http-error-body] ${detail.trim() ? truncateForLog(detail) : "<empty>"}`,
+      );
       const capacityHint =
         options.capacityLimitedModelNotes?.[options.modelId] && response.status >= 500
           ? ` — ${options.capacityLimitedModelNotes[options.modelId]}`
