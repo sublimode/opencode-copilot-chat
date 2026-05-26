@@ -28,7 +28,7 @@ This lets you pick and use OpenCode models directly from the Copilot Chat model 
 - **TTL-cached metadata** — merges live `/models` metadata with a 6-hour models.dev snapshot to resolve context window, output limits, image support, and deprecation state
 - **Bundled fallback** — keeps the picker usable offline with an internal fallback catalog when live metadata cannot be refreshed yet
 - **Tool-calling support** — forwards tool schemas using the request shape each routed model family expects
-- **Native transport compatibility** — routes Zen GPT to `/responses`, Zen Gemini to the documented Google-style endpoint, Zen Claude to `/messages`, Go MiniMax and Qwen3.7 Max to `/messages`, and the remaining models to `/chat/completions`
+- **Native transport compatibility** — routes Zen GPT to `/responses`, Zen Gemini to the documented Google-style endpoint, Zen Claude and documented Qwen 3.5/3.6 families to `/messages`, Go MiniMax and Qwen 3.5/3.6/3.7 families to `/messages`, and the remaining models to `/chat/completions`
 - **Safer requests** — adds sticky routing headers plus request and stream idle timeouts with clearer rate-limit/quota errors in VS Code
 - **Diagnostics command** — one-click markdown report showing exactly which models VS Code has registered plus recent request summaries for transport, tokens, latency, and errors
 - **Usage status bar** — shows the latest prompt/output/total/cache summary after each OpenCode response
@@ -176,8 +176,9 @@ https://opencode.ai/zen/v1/chat/completions       (Zen)
 The extension also routes these families automatically:
 
 - OpenCode Go MiniMax M2 models (`minimax-m2.*`) → `/messages`
-- OpenCode Go Qwen3.7 Max (`qwen3.7-max`) → `/messages`
+- OpenCode Go Qwen 3.5/3.6/3.7 models (`qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-max`) → `/messages`
 - OpenCode Zen Claude models (`claude-*`) → `/messages`
+- OpenCode Zen Qwen 3.5/3.6 models (`qwen3.5-plus`, `qwen3.6-plus`, `qwen3.6-plus-free`) → `/messages`
 - OpenCode Zen GPT models (`gpt-*`) → `/responses`
 - OpenCode Zen Gemini models (`gemini-*`) → `/models/{model}:streamGenerateContent?alt=sse`
 
@@ -188,7 +189,7 @@ https://opencode.ai/zen/v1/responses
 https://opencode.ai/zen/v1/models/gemini-3.5-flash:streamGenerateContent?alt=sse
 ```
 
-Current Go Qwen 3.5 and 3.6 models remain on `/chat/completions`. Go `qwen3.7-max` follows the documented `/messages` route and uses the Anthropic-compatible request shape expected by the OpenCode gateway.
+The plugin now follows the current OpenCode endpoint docs for the Qwen families: Go `qwen3.5-plus`, `qwen3.6-plus`, and `qwen3.7-max`, plus Zen `qwen3.5-plus` and `qwen3.6-plus`, are sent through `/messages` with the Anthropic-compatible request shape expected by the OpenCode gateway. `qwen3.6-plus-free` follows the same Zen Qwen transport family.
 
 ---
 
