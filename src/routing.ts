@@ -4,6 +4,11 @@ import {
   type ProviderRoutingDefinition,
 } from "./providerTypes";
 
+function isMessagesQwenModel(modelId: string): boolean {
+  return /^qwen3\.(?:5|6)-plus(?:-free)?$/i.test(modelId)
+    || /^qwen3\.7-max$/i.test(modelId);
+}
+
 export function resolveModelRouting(
   modelId: string,
   provider: ProviderRoutingDefinition,
@@ -22,7 +27,8 @@ export function resolveModelRouting(
 
   if (
     /^claude-/i.test(modelId) ||
-    (provider.vendor === GO_VENDOR && /^minimax-m2\./i.test(modelId))
+    (provider.vendor === GO_VENDOR && /^minimax-m2\./i.test(modelId)) ||
+    isMessagesQwenModel(modelId)
   ) {
     return {
       endpointKind: "messages",

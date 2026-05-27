@@ -255,6 +255,30 @@ test("resolveModelRouting chooses the expected transport family", () => {
     sdkPackage: "@ai-sdk/anthropic",
   });
 
+  assert.deepStrictEqual(resolveModelRouting("qwen3.7-max", GO_PROVIDER), {
+    endpointKind: "messages",
+    endpointUrl: "https://go.example/v1/messages",
+    sdkPackage: "@ai-sdk/anthropic",
+  });
+
+  assert.deepStrictEqual(resolveModelRouting("qwen3.6-plus", GO_PROVIDER), {
+    endpointKind: "messages",
+    endpointUrl: "https://go.example/v1/messages",
+    sdkPackage: "@ai-sdk/anthropic",
+  });
+
+  assert.deepStrictEqual(resolveModelRouting("qwen3.6-plus", ZEN_PROVIDER), {
+    endpointKind: "messages",
+    endpointUrl: "https://zen.example/v1/messages",
+    sdkPackage: "@ai-sdk/anthropic",
+  });
+
+  assert.deepStrictEqual(resolveModelRouting("qwen3.6-plus-free", ZEN_PROVIDER), {
+    endpointKind: "messages",
+    endpointUrl: "https://zen.example/v1/messages",
+    sdkPackage: "@ai-sdk/anthropic",
+  });
+
   assert.deepStrictEqual(resolveModelRouting("deepseek-v4-flash", GO_PROVIDER), {
     endpointKind: "chat-completions",
     endpointUrl: "https://go.example/v1/chat/completions",
