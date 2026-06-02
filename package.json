@@ -118,11 +118,6 @@
           "default": true,
           "description": "Show the latest OpenCode prompt/output/cache usage summary in the VS Code status bar after each response."
         },
-        "opencodego.experimentalContextIndicator": {
-          "type": "boolean",
-          "default": false,
-          "description": "Experimental: attempt to inject real token usage into the Copilot Chat context indicator using VS Code internals. May break on VS Code updates."
-        },
         "opencodego.freeOnly": {
           "type": "boolean",
           "default": true,

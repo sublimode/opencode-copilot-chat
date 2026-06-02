@@ -4,6 +4,23 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 
 ## Unreleased
 
+### Added
+
+- Added support for VS Code's `languageModelPricing` proposed API, exposing `pricing`, `inputCost`, `outputCost`, `cacheCost`, and `priceCategory` on every registered model so the model picker and management UI can display real cost metadata.
+- Parsed per-model cost data from the live `models.dev` registry (`cost.input`, `cost.output`, `cost.cache_read`, `cost.cache_write`) and converted USD values to AI Credits (`1 USD = 100 AI credits`) for native VS Code consumption.
+- Added modality detection from `models.dev` metadata, surfacing audio, video, and PDF input support in model tooltips and detail badges alongside the existing vision indicator.
+
+### Changed
+
+- Removed the `opencodego.experimentalContextIndicator` configuration setting and its associated context-window hook bridge; the same capability was already implemented natively in commit `ca8bbb6` and the redundant experimental path is no longer needed.
+- Consolidated duplicate local type definitions (`BaseModelLimits`, `ModelMetadataFields`, `CachedModelMetadataSnapshot`, `ResolvedModelMetadata`) that were shadowing the canonical types in `metadata.ts`, ensuring `cost` and modality fields flow correctly through the metadata pipeline.
+- Bumped the cached `models.dev` snapshot key from `v3` to `v4` so users automatically re-fetch the registry on next activation and pick up the freshly added `cost` and modality data, instead of consuming stale cached entries that did not carry those fields.
+- Aligned the `priceCategory` thresholds with the Copilot extension's 3:1 input:output weighted blend so low/medium/high/very_high buckets line up with what the user sees for the official Copilot models (e.g. Kimi k2.6 is `medium`, GPT-5.4 is `medium`, Claude Opus 4.5 is `high`, GPT-5.4 Pro is `very_high`).
+
+### Fixed
+
+- Corrected the `modelCapabilities` return type to use the official `vscode.LanguageModelChatCapabilities` shape (`imageInput`, `toolCalling`, `supportsImageToText`, `supportsToolCalling`) instead of ad-hoc fields, aligning with how VS Code internally maps provider capabilities to `vision` / `toolCalling` / `agentMode`.
+
 ## [0.1.7] — 2026-05-27
 
 ### Added

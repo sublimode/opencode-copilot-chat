@@ -14,7 +14,12 @@ import {
   normalizeModelsDevSnapshot,
   resolveModelMetadata,
   toEffectiveModelId,
+  type BaseModelLimits,
+  type CachedModelMetadataSnapshot,
+  type ModelCost,
+  type ModelMetadataFields,
   type ModelsDevResponse,
+  type ResolvedModelMetadata,
 } from "./metadata";
 import {
   resolveModelRouting,
@@ -29,10 +34,6 @@ import {
 } from "./streaming";
 import { GO_VENDOR, ZEN_VENDOR } from "./providerTypes";
 import { isInternalDataPart } from "./chatParts";
-import {
-  disposeContextWindowHookBridge,
-  initializeContextWindowHookBridge,
-} from "./contextWindowHookBridge";
 import {
   formatCacheHitRatio,
   formatUsageStatusBarText,
@@ -266,38 +267,10 @@ type ConfiguredLanguageModelResponseOptions = vscode.ProvideLanguageModelChatRes
   configuration?: LanguageModelConfiguration;
 };
 
-interface BaseModelLimits {
-  contextWindow: number;
-  maxOutputTokens: number;
-}
-
 interface ModelLimits extends BaseModelLimits {
   advertisedContextWindow: number;
   advertisedMaxInputTokens: number;
   advertisedMaxOutputTokens: number;
-}
-
-interface ModelMetadataFields {
-  contextWindow?: number;
-  maxOutputTokens?: number;
-  supportsVision?: boolean;
-  reasoning?: boolean;
-  status?: string;
-}
-
-interface CachedModelMetadataSnapshot {
-  fetchedAt: number;
-  providers: Record<
-    ProviderDefinition["vendor"],
-    Record<string, ModelMetadataFields>
-  >;
-}
-
-interface ResolvedModelMetadata extends BaseModelLimits {
-  supportsVision: boolean;
-  reasoning: boolean;
-  status?: string;
-  source: "models.dev" | "live" | "fallback" | "default";
 }
 
 interface ModelRoutingFields {
@@ -414,7 +387,6 @@ interface RecentTransportSummary extends TransportRequestSummary {
 
 export function activate(context: vscode.ExtensionContext) {
   ensureUsageStatusBar(context);
-  void syncExperimentalContextIndicator();
   const goProvider = new OpenCodeProvider(context, PROVIDERS[GO_VENDOR]);
   const zenProvider = new OpenCodeProvider(context, PROVIDERS[ZEN_VENDOR]);
 
@@ -433,9 +405,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("opencodego.showUsageStatusBar")) {
         resetUsageStatusBar();
-      }
-      if (event.affectsConfiguration("opencodego.experimentalContextIndicator")) {
-        void syncExperimentalContextIndicator();
       }
     }),
   );
@@ -508,7 +477,7 @@ async function showThinkingEffortPicker(): Promise<void> {
 }
 
 export async function deactivate(): Promise<void> {
-  await disposeContextWindowHookBridge();
+  // no-op: experimental context indicator hooks removed in 0.1.8
 }
 
 function ensureUsageStatusBar(
@@ -530,43 +499,6 @@ function shouldShowUsageStatusBar(): boolean {
   return vscode.workspace
     .getConfiguration("opencodego")
     .get("showUsageStatusBar", true);
-}
-
-function isExperimentalContextIndicatorEnabled(): boolean {
-  return vscode.workspace
-    .getConfiguration("opencodego")
-    .get("experimentalContextIndicator", false);
-}
-
-let hookDiagnosticChannel: vscode.OutputChannel | undefined;
-
-function getHookDiagnosticChannel(): vscode.OutputChannel {
-  if (!hookDiagnosticChannel) {
-    hookDiagnosticChannel = vscode.window.createOutputChannel("OpenCode");
-  }
-  return hookDiagnosticChannel;
-}
-
-function hookDiagnostic(message: string): void {
-  getHookDiagnosticChannel().appendLine(
-    `[${new Date().toISOString()}] [contextWindowHook] ${message}`,
-  );
-}
-
-async function syncExperimentalContextIndicator(): Promise<void> {
-  if (isExperimentalContextIndicatorEnabled()) {
-    const ok = await initializeContextWindowHookBridge(hookDiagnostic);
-    if (!ok) {
-      hookDiagnostic(
-        "experimentalContextIndicator is enabled but the bridge could not activate. " +
-        "The Copilot Chat footer will show default (estimated) usage. " +
-        "This is expected if VS Code internals changed — check for extension updates.",
-      );
-    }
-    return;
-  }
-
-  await disposeContextWindowHookBridge();
 }
 
 function resetUsageStatusBar(): void {
@@ -959,6 +891,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       this.apiKeysByModelId.set(effectiveModelId, apiKey);
 
       const capacityNote = CAPACITY_LIMITED_MODEL_NOTES[modelId];
+      const modalityBadges = formatModalityBadges(metadata);
       const baseDetail = this.definition.vendor === ZEN_VENDOR && isFreeZenModel(modelId) ? "Free" : this.definition.displayName;
       const baseTooltip = `${this.definition.displayName} model: ${modelId}`;
       const configurationSchema = modelConfigurationSchema(modelId);
@@ -971,8 +904,16 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         // Include effective limits in version so VS Code invalidates stale
         // picker metadata after limit changes (eg. 2M -> 262K corrections).
         version: `1.2.0-${MODEL_METADATA_REVISION}-${limits.contextWindow}-${limits.maxOutputTokens}`,
-        detail: capacityNote ? `${baseDetail} • Limited capacity` : baseDetail,
-        tooltip: capacityNote ? `${baseTooltip}\n\nℹ ${capacityNote}` : baseTooltip,
+        detail: capacityNote
+          ? `${baseDetail} • Limited capacity`
+          : modalityBadges
+            ? `${baseDetail} • ${modalityBadges}`
+            : baseDetail,
+        tooltip: capacityNote
+          ? `${baseTooltip}\n\n${capacityNote}`
+          : modalityBadges
+            ? `${baseTooltip}\n\n${modalityBadges}`
+            : baseTooltip,
         category: {
           label: this.definition.displayName,
           order: this.definition.categoryOrder
@@ -983,6 +924,8 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         capabilities: modelCapabilities(metadata),
         endpointKind: routing.endpointKind,
         provider: this.definition,
+        // Pricing fields (VS Code languageModelPricing proposal)
+        ...modelPricingFields(modelId, this.definition.vendor, metadata),
         // Inline so Copilot Chat picks up the Thinking submenu directly
         // (parity with zelosleone/Opencode-Go-For-Copilot pattern).
         ...(configurationSchema ? { configurationSchema } : {})
@@ -2499,13 +2442,38 @@ function positiveOverride(value: number): number | undefined {
 }
 
 function modelCapabilities(metadata: ResolvedModelMetadata): CopilotCompatibleCapabilities {
+  // Mirrors the official shape used by `copilotChat`/`byok` providers:
+  // `imageInput` and `toolCalling` are the raw proposed-API fields VS Code
+  // maps to `vision` / `toolCalling` / `agentMode` internally, while
+  // `supportsImageToText` and `supportsToolCalling` are the runtime API
+  // booleans consumed by the `vscode.lm` callers in extensions.
   const supportsVision = metadata.supportsVision;
   return {
     imageInput: supportsVision,
-    toolCalling: 128,
+    toolCalling: true,
     supportsImageToText: supportsVision,
-    supportsToolCalling: true
+    supportsToolCalling: true,
   };
+}
+
+function formatModalityBadges(metadata: ResolvedModelMetadata): string {
+  const badges: string[] = [];
+  if (metadata.supportsVision) {
+    badges.push("Image");
+  }
+  if (metadata.supportsPdf) {
+    badges.push("PDF");
+  }
+  if (metadata.supportsVideo) {
+    badges.push("Video");
+  }
+  if (metadata.supportsAudio && !metadata.supportsVideo && !metadata.supportsPdf) {
+    badges.push("Audio");
+  }
+  if (metadata.supportsAudio && (metadata.supportsVideo || metadata.supportsPdf)) {
+    badges.push("Audio");
+  }
+  return badges.join(" · ");
 }
 
 function shouldHideDeprecatedModel(
@@ -2534,6 +2502,100 @@ function resolveRawModelId(modelId: string): string {
 
 function isFreeZenModel(modelId: string): boolean {
   return modelId.endsWith("-free") || FREE_ZEN_MODEL_IDS.has(modelId);
+}
+
+function isFreeModel(modelId: string, vendor: ProviderDefinition["vendor"]): boolean {
+  return (
+    FREE_ZEN_MODEL_IDS.has(modelId) ||
+    modelId.endsWith("-free")
+  );
+}
+
+/**
+ * Returns pricing fields for VS Code's language model pricing proposal
+ * (`vscode.proposed.languageModelPricing`).
+ *
+ * Cost data from models.dev is in USD; VS Code expects AI Credits
+ * (1 credit = $0.01 USD). We convert by multiplying by 100 so the
+ * pricing table shows values comparable to Copilot's own models.
+ *
+ * The `pricing` string matches the format used by the Copilot extension's
+ * `formatPricingLabel` (`In: $X · Out: $Y /1M tokens`) so the picker hover
+ * reads consistently across providers.
+ */
+function modelPricingFields(
+  modelId: string,
+  vendor: ProviderDefinition["vendor"],
+  metadata: ResolvedModelMetadata,
+): {
+  pricing?: string;
+  priceCategory?: string;
+  inputCost?: number;
+  outputCost?: number;
+  cacheCost?: number;
+} {
+  const free = isFreeModel(modelId, vendor);
+
+  if (free) {
+    return { pricing: "Free", priceCategory: "low" };
+  }
+
+  const cost = metadata.cost;
+  if (cost) {
+    const inputCredits = Math.round(cost.input * 100);
+    const outputCredits = Math.round(cost.output * 100);
+    const cacheCredits = cost.cache_read !== undefined
+      ? Math.round(cost.cache_read * 100)
+      : undefined;
+
+    const fmt = (v: number) => `$${v.toFixed(v < 0.1 ? 2 : 1)}`;
+    return {
+      pricing: `In: ${fmt(cost.input)} · Out: ${fmt(cost.output)} /1M tokens`,
+      priceCategory: costCategory(cost),
+      inputCost: inputCredits,
+      outputCost: outputCredits,
+      ...(cacheCredits !== undefined ? { cacheCost: cacheCredits } : {}),
+    };
+  }
+
+  // No models.dev cost data: fall back to a neutral label so the picker
+  // shows something instead of pretending we know the price.
+  return {
+    pricing: `${vendor === GO_VENDOR ? "Go" : "Zen"} subscription`,
+  };
+}
+
+/**
+ * Maps per-million-token USD cost to the four-tier `priceCategory` labels
+ * (`low` / `medium` / `high` / `very_high`) that VS Code's language model
+ * picker renders as a visual cost indicator.
+ *
+ * VS Code's own `getPriceCategoryLabel` (chatModelPicker.ts) just translates
+ * the string but does not assign thresholds - the Copilot extension uses
+ * billing multipliers and a weighted 3:1 input:output blend to mirror the
+ * user's billing mix. We follow the same 3:1 weighting here so our category
+ * lines up with what the user sees for the official Copilot models:
+ *
+ * - low       : qwen3.5-plus, deepseek-v4-flash-free, mimo-v2-flash-free
+ * - medium    : kimi-k2.6, gemini-3-flash, claude-haiku-4-5, gpt-5,
+ *               gpt-5.2, gpt-5.4, claude-sonnet-4-6
+ * - high      : claude-opus-4-5, claude-opus-4-7, gpt-5.5
+ * - very_high : gpt-5.4-pro, gpt-5.5-pro, claude-opus-4-1
+ *
+ * Free models (`cost.input == 0 && cost.output == 0`) are reported as `low`
+ * because that is the bucket VS Code uses for "Free" entries in the picker.
+ */
+function costCategory(cost: { input: number; output: number }): string {
+  if (cost.input <= 0 && cost.output <= 0) {
+    return "low";
+  }
+  // Mirrors Copilot's 3:1 input:output blend (input tokens are usually the
+  // larger share of a request, so they get more weight than raw sum).
+  const weighted = cost.input * 3 + cost.output;
+  if (weighted <= 2) return "low";
+  if (weighted <= 25) return "medium";
+  if (weighted <= 50) return "high";
+  return "very_high";
 }
 
 function formatModelName(modelId: string): string {

@@ -5,12 +5,27 @@ export interface BaseModelLimits {
   maxOutputTokens: number;
 }
 
+export interface ModelCost {
+  /** Dollars per 1M input tokens. */
+  input: number;
+  /** Dollars per 1M output tokens. */
+  output: number;
+  /** Dollars per 1M cache read tokens. */
+  cache_read?: number;
+  /** Dollars per 1M cache write tokens. */
+  cache_write?: number;
+}
+
 export interface ModelMetadataFields {
   contextWindow?: number;
   maxOutputTokens?: number;
   supportsVision?: boolean;
+  supportsAudio?: boolean;
+  supportsVideo?: boolean;
+  supportsPdf?: boolean;
   reasoning?: boolean;
   status?: string;
+  cost?: ModelCost;
 }
 
 export interface CachedModelMetadataSnapshot {
@@ -20,9 +35,13 @@ export interface CachedModelMetadataSnapshot {
 
 export interface ResolvedModelMetadata extends BaseModelLimits {
   supportsVision: boolean;
+  supportsAudio: boolean;
+  supportsVideo: boolean;
+  supportsPdf: boolean;
   reasoning: boolean;
   status?: string;
   source: "models.dev" | "live" | "fallback" | "default";
+  cost?: ModelCost;
 }
 
 export interface ModelListEntry {
@@ -59,6 +78,12 @@ export interface ModelsDevModelRecord {
     input?: string[];
     output?: string[];
   };
+  cost?: {
+    input?: number;
+    output?: number;
+    cache_read?: number;
+    cache_write?: number;
+  };
 }
 
 interface ModelsDevProviderRecord {
@@ -72,7 +97,7 @@ export interface ModelsDevResponse {
 
 export const MODELS_DEV_API_URL = "https://models.dev/api.json";
 export const MODEL_METADATA_REVISION = "session-2026-05-21-b";
-export const MODEL_METADATA_CACHE_KEY = "opencodego.modelMetadataCache.v3";
+export const MODEL_METADATA_CACHE_KEY = "opencodego.modelMetadataCache.v4";
 export const MODEL_METADATA_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 const DEFAULT_MODEL_LIMITS: BaseModelLimits = {
@@ -265,6 +290,11 @@ export function normalizeModelsDevSnapshot(
 export function normalizeLiveModelMetadata(
   model: ModelListEntry,
 ): ModelMetadataFields | undefined {
+  const modalities = detectModalityFlags(
+    model.modalities,
+    model.imageInput ?? model.image_input ?? model.attachment,
+  );
+
   return normalizeModelMetadataFields({
     contextWindow: positiveNumber(
       model.contextWindow ?? model.context_window ?? model.limit?.context,
@@ -272,10 +302,10 @@ export function normalizeLiveModelMetadata(
     maxOutputTokens: positiveNumber(
       model.maxOutputTokens ?? model.max_output_tokens ?? model.limit?.output,
     ),
-    supportsVision: detectVisionSupport(
-      model.modalities,
-      model.imageInput ?? model.image_input ?? model.attachment,
-    ),
+    supportsVision: modalities.supportsVision,
+    supportsAudio: modalities.supportsAudio,
+    supportsVideo: modalities.supportsVideo,
+    supportsPdf: modalities.supportsPdf,
     reasoning:
       typeof model.reasoning === "boolean" ? model.reasoning : undefined,
     status: model.deprecated
@@ -312,6 +342,18 @@ export function resolveModelMetadata(
       cachedMetadata?.supportsVision ??
       fallbackMetadata?.supportsVision ??
       false,
+    supportsAudio:
+      liveMetadata?.supportsAudio ??
+      cachedMetadata?.supportsAudio ??
+      false,
+    supportsVideo:
+      liveMetadata?.supportsVideo ??
+      cachedMetadata?.supportsVideo ??
+      false,
+    supportsPdf:
+      liveMetadata?.supportsPdf ??
+      cachedMetadata?.supportsPdf ??
+      false,
     reasoning:
       liveMetadata?.reasoning ??
       cachedMetadata?.reasoning ??
@@ -328,6 +370,10 @@ export function resolveModelMetadata(
         : fallbackMetadata
           ? "fallback"
           : "default",
+    cost:
+      liveMetadata?.cost ??
+      cachedMetadata?.cost ??
+      fallbackMetadata?.cost,
   };
 }
 
@@ -355,13 +401,29 @@ function normalizeModelsDevProvider(
   const normalized: Record<string, ModelMetadataFields> = {};
 
   for (const [modelId, model] of Object.entries(models)) {
+    const modalities = detectModalityFlags(model.modalities, model.attachment);
+    const rawCost = model.cost;
+    const cost: ModelCost | undefined =
+      typeof rawCost?.input === "number" && typeof rawCost?.output === "number"
+        ? {
+            input: rawCost.input,
+            output: rawCost.output,
+            ...(typeof rawCost.cache_read === "number" ? { cache_read: rawCost.cache_read } : {}),
+            ...(typeof rawCost.cache_write === "number" ? { cache_write: rawCost.cache_write } : {}),
+          }
+        : undefined;
+
     const metadata = normalizeModelMetadataFields({
       contextWindow: positiveNumber(model.limit?.context),
       maxOutputTokens: positiveNumber(model.limit?.output),
-      supportsVision: detectVisionSupport(model.modalities, model.attachment),
+      supportsVision: modalities.supportsVision,
+      supportsAudio: modalities.supportsAudio,
+      supportsVideo: modalities.supportsVideo,
+      supportsPdf: modalities.supportsPdf,
       reasoning:
         typeof model.reasoning === "boolean" ? model.reasoning : undefined,
       status: typeof model.status === "string" ? model.status : undefined,
+      cost,
     });
 
     if (metadata) {
@@ -379,25 +441,49 @@ function normalizeModelMetadataFields(
     metadata.contextWindow === undefined &&
     metadata.maxOutputTokens === undefined &&
     metadata.supportsVision === undefined &&
+    metadata.supportsAudio === undefined &&
+    metadata.supportsVideo === undefined &&
+    metadata.supportsPdf === undefined &&
     metadata.reasoning === undefined &&
-    metadata.status === undefined
+    metadata.status === undefined &&
+    metadata.cost === undefined
   ) {
     return undefined;
   }
   return metadata;
 }
 
-function detectVisionSupport(
+interface ModalityFlags {
+  supportsVision: boolean | undefined;
+  supportsAudio: boolean | undefined;
+  supportsVideo: boolean | undefined;
+  supportsPdf: boolean | undefined;
+}
+
+function detectModalityFlags(
   modalities: { input?: string[]; output?: string[] } | undefined,
   attachmentHint: boolean | undefined,
-): boolean | undefined {
+): ModalityFlags {
   const inputModalities = Array.isArray(modalities?.input)
     ? modalities.input
     : undefined;
+
   if (inputModalities?.length) {
-    return inputModalities.some((modality) => modality !== "text");
+    return {
+      supportsVision: inputModalities.some((m) => m !== "text"),
+      supportsAudio: inputModalities.includes("audio") || undefined,
+      supportsVideo: inputModalities.includes("video") || undefined,
+      supportsPdf: inputModalities.includes("pdf") || undefined,
+    };
   }
-  return typeof attachmentHint === "boolean" ? attachmentHint : undefined;
+
+  const fallback = typeof attachmentHint === "boolean" ? attachmentHint : undefined;
+  return {
+    supportsVision: fallback,
+    supportsAudio: undefined,
+    supportsVideo: undefined,
+    supportsPdf: undefined,
+  };
 }
 
 function positiveNumber(value: unknown): number | undefined {

@@ -48,6 +48,36 @@ declare module 'vscode' {
 		readonly multiplierNumeric?: number;
 
 		/**
+		 * Optional pricing label for this model, such as "Free", etc.
+		 * This value is meant for display purposes and will be shown in the model management UI.
+		 */
+		readonly pricing?: string;
+
+		/**
+		 * Optional input cost in AI credits for this model.
+		 * Displayed in the model management UI as the cost per million input tokens.
+		 */
+		readonly inputCost?: number;
+
+		/**
+		 * Optional output cost in AI credits for this model.
+		 * Displayed in the model management UI as the cost per million output tokens.
+		 */
+		readonly outputCost?: number;
+
+		/**
+		 * Optional cache cost in AI credits for this model.
+		 * Displayed in the model management UI as the cost per million cached tokens.
+		 */
+		readonly cacheCost?: number;
+
+		/**
+		 * Optional relative pricing category for this model (e.g. "low", "medium", "high", "very_high").
+		 * Displayed in the model picker as a visual indicator of relative cost.
+		 */
+		readonly priceCategory?: string;
+
+		/**
 		 * Whether or not this will be selected by default in the model picker
 		 * NOT BEING FINALIZED
 		 */
