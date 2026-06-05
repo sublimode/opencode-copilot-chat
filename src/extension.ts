@@ -40,12 +40,20 @@ import {
   formatUsageStatusBarTooltip,
   type UsageSnapshot,
 } from "./usage";
+import {
+  GoUsageTracker,
+  formatGoUsageStatusBarText,
+} from "./goUsageTracker";
 
 const SECRET_KEY = "opencodego.apiKey";
 const RECENT_TRANSPORT_SUMMARY_LIMIT = 25;
 const RECENT_TRANSPORT_SUMMARY_STORAGE_PREFIX = "opencode.recentTransportSummaries";
 
 let usageStatusBarItem: vscode.StatusBarItem | undefined;
+let goUsageStatusBarItem: vscode.StatusBarItem | undefined;
+let goUsageWebView: vscode.WebviewPanel | undefined;
+
+let goUsageTracker: GoUsageTracker | undefined;
 
 interface ProviderDefinition {
   vendor: typeof GO_VENDOR | typeof ZEN_VENDOR;
@@ -386,7 +394,13 @@ interface RecentTransportSummary extends TransportRequestSummary {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  const goUsageLogChannel = vscode.window.createOutputChannel("OpenCode Go Usage");
+  context.subscriptions.push(goUsageLogChannel);
+  goUsageTracker = new GoUsageTracker(context, (msg) => {
+    goUsageLogChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+  });
   ensureUsageStatusBar(context);
+  ensureGoUsageStatusBar(context);
   const goProvider = new OpenCodeProvider(context, PROVIDERS[GO_VENDOR]);
   const zenProvider = new OpenCodeProvider(context, PROVIDERS[ZEN_VENDOR]);
 
@@ -398,7 +412,8 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("opencodego.setApiKey", () => goProvider.setApiKey()),
     vscode.commands.registerCommand("opencodezen.diagnostics", () => zenProvider.showDiagnostics()),
     vscode.commands.registerCommand("opencodego.modelPickerDiagnostics", () => showModelPickerDiagnostics()),
-    vscode.commands.registerCommand("opencodego.setThinkingEffort", () => showThinkingEffortPicker())
+    vscode.commands.registerCommand("opencodego.setThinkingEffort", () => showThinkingEffortPicker()),
+    vscode.commands.registerCommand("opencodego.showUsage", () => showGoUsagePanel())
   );
 
   context.subscriptions.push(
@@ -546,6 +561,150 @@ function updateUsageStatusBar(
     usage,
   );
   usageStatusBarItem.show();
+}
+
+
+function ensureGoUsageStatusBar(context: vscode.ExtensionContext): void {
+  if (goUsageStatusBarItem) return;
+  goUsageStatusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    94,
+  );
+  goUsageStatusBarItem.command = "opencodego.showUsage";
+  context.subscriptions.push(goUsageStatusBarItem);
+  refreshGoUsageStatusBar();
+}
+
+
+
+function refreshGoUsageStatusBar(): void {
+  if (!goUsageStatusBarItem || !goUsageTracker) return;
+  const s = goUsageTracker.getSummary();
+  goUsageStatusBarItem.text    = formatGoUsageStatusBarText(s);
+  goUsageStatusBarItem.tooltip = buildUsageTooltip(s);
+  goUsageStatusBarItem.show();
+}
+
+function buildUsageTooltip(s: ReturnType<GoUsageTracker["getSummary"]>): vscode.MarkdownString {
+  const md = new vscode.MarkdownString("", true);
+  md.isTrusted        = true;
+  md.supportThemeIcons = true;
+  md.supportHtml       = true;
+
+  md.appendMarkdown(`**OpenCode Go** &nbsp;&nbsp; Subscription Limits\n\n`);
+  md.appendMarkdown(`---\n\n`);
+
+  if (!s.hasData) {
+    md.appendMarkdown(`*No usage data yet. Send a chat message to start tracking.*\n`);
+    return md;
+  }
+
+  const bar = (pct: number): string => {
+    const n = Math.round(Math.min(pct, 100) / 10);
+    return "█".repeat(n) + "░".repeat(10 - n);
+  };
+  const dot = (pct: number) => pct >= 80 ? "$(warning)" : pct >= 50 ? "$(circle-large-filled)" : "$(circle-outline)";
+
+  for (const [label, p] of [
+    ["Session (5h rolling)", s.session],
+    ["Weekly",              s.weekly],
+    ["Monthly",             s.monthly],
+  ] as [string, typeof s.session][]) {
+    md.appendMarkdown(`${dot(p.percent)} **${label}**\n\n`);
+    md.appendMarkdown(`\`${bar(p.percent)}\` **${p.percent.toFixed(1)}%** &nbsp; ${usd(p.spent)} / ${usd(p.limit)} &nbsp;·&nbsp; resets in ${rel(p.resetsAt)}\n\n`);
+  }
+
+  md.appendMarkdown(`---\n\n`);
+  md.appendMarkdown(`$(history) **Today** &nbsp; ${usd(s.today.cost)} &nbsp;·&nbsp; ${s.today.requests} req &nbsp;·&nbsp; ${tokens(s.today.tokens)} tokens\n\n`);
+  if (s.yesterday.requests > 0) {
+    md.appendMarkdown(`$(history) **Yesterday** &nbsp; ${usd(s.yesterday.cost)} &nbsp;·&nbsp; ${s.yesterday.requests} req\n\n`);
+  }
+
+  return md;
+}
+
+function showGoUsagePanel(): void {
+  if (!goUsageTracker) return;
+  const s = goUsageTracker.getSummary();
+
+  if (goUsageWebView) {
+    goUsageWebView.webview.html = buildUsageHtml(s);
+    goUsageWebView.reveal(vscode.ViewColumn.Beside, true);
+    return;
+  }
+
+  const panel = vscode.window.createWebviewPanel(
+    "opencodego.usage",
+    "OpenCode Go — Usage",
+    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+    { enableScripts: false, retainContextWhenHidden: false },
+  );
+  panel.webview.html = buildUsageHtml(s);
+  panel.onDidDispose(() => { goUsageWebView = undefined; });
+  goUsageWebView = panel;
+}
+
+function buildUsageHtml(s: ReturnType<GoUsageTracker["getSummary"]>): string {
+  const bar = (pct: number): string => {
+    const clamped = Math.min(pct, 100);
+    const color = clamped >= 80 ? "#f14c4c" : clamped >= 50 ? "#cca700" : "#73c991";
+    return `<div style="display:flex;align-items:center;gap:8px;margin:4px 0 8px">
+      <div style="flex:1;height:6px;background:#3c3c3c;border-radius:3px;overflow:hidden">
+        <div style="width:${clamped}%;height:100%;background:${color};border-radius:3px"></div>
+      </div>
+      <span style="min-width:48px;text-align:right;font-size:12px">${clamped.toFixed(1)}%</span>
+    </div>`;
+  };
+  const row = (label: string, pct: number, spent: number, limit: number, reset: string) =>
+    `<div style="margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+        <span style="font-weight:600;font-size:13px">${label}</span>
+        <span style="color:var(--vscode-descriptionForeground);font-size:11px">Resets in ${reset}</span>
+      </div>
+      ${bar(pct)}
+      <div style="color:var(--vscode-descriptionForeground);font-size:11px">${usd(spent)} / ${usd(limit)} used</div>
+    </div>`;
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+  body{margin:0;padding:20px 24px;font-family:var(--vscode-font-family,sans-serif);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground)}
+  h2{font-size:14px;font-weight:600;margin:0 0 16px;color:var(--vscode-editor-foreground)}
+  hr{border:none;border-top:1px solid var(--vscode-widget-border,#3c3c3c);margin:16px 0}
+  .row{display:flex;gap:24px;font-size:12px;color:var(--vscode-descriptionForeground)}
+  .row b{color:var(--vscode-editor-foreground)}
+</style></head><body>
+<h2>OpenCode Go — Usage</h2>
+${!s.hasData
+  ? `<p style="color:var(--vscode-descriptionForeground)">No usage data yet. Send a chat message to start tracking.</p>`
+  : `${row("Session (5h rolling)", s.session.percent, s.session.spent, s.session.limit, rel(s.session.resetsAt))}
+     ${row("Weekly", s.weekly.percent, s.weekly.spent, s.weekly.limit, rel(s.weekly.resetsAt))}
+     ${row("Monthly", s.monthly.percent, s.monthly.spent, s.monthly.limit, rel(s.monthly.resetsAt))}
+     <hr><div class="row">
+       <span>Today: <b>${usd(s.today.cost)}</b></span>
+       <span>Requests: <b>${s.today.requests}</b></span>
+       <span>Tokens: <b>${tokens(s.today.tokens)}</b></span>
+     </div>
+     ${s.yesterday.requests > 0 ? `<div class="row" style="margin-top:8px">
+       <span>Yesterday: <b>${usd(s.yesterday.cost)}</b></span>
+       <span>Requests: <b>${s.yesterday.requests}</b></span></div>` : ""}`
+}
+</body></html>`;
+}
+
+type _UsageSummary = ReturnType<GoUsageTracker["getSummary"]>;
+
+function usd(v: number): string { return `$${v.toFixed(2)}`; }
+function tokens(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000)     return `${(v / 1_000).toFixed(1)}K`;
+  return v.toString();
+}
+function rel(date: Date): string {
+  const min = Math.max(0, Math.floor((date.getTime() - Date.now()) / 60_000));
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
 }
 
 class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel> {
@@ -983,6 +1142,12 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         options.requestInitiator,
       );
       updateUsageStatusBar(this.definition.displayName, rawModelId, summary);
+      if (this.definition.vendor === GO_VENDOR && goUsageTracker) {
+        this.log(`[go-usage] Recording: provider=${summary.providerDisplayName} model=${summary.modelId} promptTokens=${summary.promptTokens ?? "n/a"} completionTokens=${summary.completionTokens ?? "n/a"} cachedTokens=${summary.cachedTokens ?? "n/a"} status=${summary.status ?? "n/a"} error=${summary.errorMessage ?? "none"}`);
+        goUsageTracker.record(summary, metadata.cost);
+        refreshGoUsageStatusBar();
+        this.log(`[go-usage] After record: entries=${goUsageTracker.getSummary().today.requests}`);
+      }
     };
 
     this.log(`Request: initiator=${options.requestInitiator} model=${model.id} rawModel=${rawModelId} endpoint=${routing.endpointKind} metadataSource=${metadata.source} messages=${apiMessages.length} session=${requestHeaders["x-opencode-session"]} request=${requestHeaders["x-opencode-request"]} modelConfiguration=${JSON.stringify(pickThinkingModelConfiguration(requestOverride))} thinking=${JSON.stringify(settings.thinking)} thinkingPayload=${JSON.stringify(thinkingPayload)}`);

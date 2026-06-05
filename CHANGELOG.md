@@ -2,6 +2,18 @@
 
 All notable changes to the **OpenCode Go BYOK Provider** extension are documented here.
 
+## [0.2.0] — 2026-06-05
+
+### Added
+
+- Added **Go Usage Tracker** — real-time tracking of OpenCode Go subscription limits as percentages in the status bar and a Quick Pick panel.
+  - Tracks 5-hour rolling ($12), weekly ($30), and monthly ($60) limits per the OpenCode Go subscription tiers.
+  - Calculates client-side cost from token usage × per-model pricing (input, output, cache_read) for every Go model.
+  - Status bar indicator (`Go: 27%·62%·75%`) shows 5h / weekly / monthly usage at a glance, with ⚠ warning when any period exceeds 80%.
+  - Click the status bar to open a detailed Quick Pick panel showing progress bars, today/yesterday breakdown, and actions to open diagnostics console or reset data.
+  - Usage log persisted in VS Code `globalState` so data survives editor restarts.
+  - New command: `OpenCode Go: Show Usage` (`opencodego.showUsage`).
+
 ## [0.1.10] — 2026-06-05
 
 ### Fixed
