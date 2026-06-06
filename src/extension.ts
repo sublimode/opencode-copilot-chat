@@ -14,7 +14,12 @@ import {
   normalizeModelsDevSnapshot,
   resolveModelMetadata,
   toEffectiveModelId,
+  type BaseModelLimits,
+  type CachedModelMetadataSnapshot,
+  type ModelCost,
+  type ModelMetadataFields,
   type ModelsDevResponse,
+  type ResolvedModelMetadata,
 } from "./metadata";
 import {
   resolveModelRouting,
@@ -30,21 +35,25 @@ import {
 import { GO_VENDOR, ZEN_VENDOR } from "./providerTypes";
 import { isInternalDataPart } from "./chatParts";
 import {
-  disposeContextWindowHookBridge,
-  initializeContextWindowHookBridge,
-} from "./contextWindowHookBridge";
-import {
   formatCacheHitRatio,
   formatUsageStatusBarText,
   formatUsageStatusBarTooltip,
   type UsageSnapshot,
 } from "./usage";
+import {
+  GoUsageTracker,
+  formatGoUsageStatusBarText,
+} from "./goUsageTracker";
 
 const SECRET_KEY = "opencodego.apiKey";
 const RECENT_TRANSPORT_SUMMARY_LIMIT = 25;
 const RECENT_TRANSPORT_SUMMARY_STORAGE_PREFIX = "opencode.recentTransportSummaries";
 
 let usageStatusBarItem: vscode.StatusBarItem | undefined;
+let goUsageStatusBarItem: vscode.StatusBarItem | undefined;
+let goUsageWebView: vscode.WebviewPanel | undefined;
+
+let goUsageTracker: GoUsageTracker | undefined;
 
 interface ProviderDefinition {
   vendor: typeof GO_VENDOR | typeof ZEN_VENDOR;
@@ -266,38 +275,10 @@ type ConfiguredLanguageModelResponseOptions = vscode.ProvideLanguageModelChatRes
   configuration?: LanguageModelConfiguration;
 };
 
-interface BaseModelLimits {
-  contextWindow: number;
-  maxOutputTokens: number;
-}
-
 interface ModelLimits extends BaseModelLimits {
   advertisedContextWindow: number;
   advertisedMaxInputTokens: number;
   advertisedMaxOutputTokens: number;
-}
-
-interface ModelMetadataFields {
-  contextWindow?: number;
-  maxOutputTokens?: number;
-  supportsVision?: boolean;
-  reasoning?: boolean;
-  status?: string;
-}
-
-interface CachedModelMetadataSnapshot {
-  fetchedAt: number;
-  providers: Record<
-    ProviderDefinition["vendor"],
-    Record<string, ModelMetadataFields>
-  >;
-}
-
-interface ResolvedModelMetadata extends BaseModelLimits {
-  supportsVision: boolean;
-  reasoning: boolean;
-  status?: string;
-  source: "models.dev" | "live" | "fallback" | "default";
 }
 
 interface ModelRoutingFields {
@@ -413,8 +394,13 @@ interface RecentTransportSummary extends TransportRequestSummary {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  const goUsageLogChannel = vscode.window.createOutputChannel("OpenCode Go Usage");
+  context.subscriptions.push(goUsageLogChannel);
+  goUsageTracker = new GoUsageTracker(context, (msg) => {
+    goUsageLogChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+  });
   ensureUsageStatusBar(context);
-  void syncExperimentalContextIndicator();
+  ensureGoUsageStatusBar(context);
   const goProvider = new OpenCodeProvider(context, PROVIDERS[GO_VENDOR]);
   const zenProvider = new OpenCodeProvider(context, PROVIDERS[ZEN_VENDOR]);
 
@@ -426,16 +412,14 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("opencodego.setApiKey", () => goProvider.setApiKey()),
     vscode.commands.registerCommand("opencodezen.diagnostics", () => zenProvider.showDiagnostics()),
     vscode.commands.registerCommand("opencodego.modelPickerDiagnostics", () => showModelPickerDiagnostics()),
-    vscode.commands.registerCommand("opencodego.setThinkingEffort", () => showThinkingEffortPicker())
+    vscode.commands.registerCommand("opencodego.setThinkingEffort", () => showThinkingEffortPicker()),
+    vscode.commands.registerCommand("opencodego.showUsage", () => showGoUsagePanel())
   );
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("opencodego.showUsageStatusBar")) {
         resetUsageStatusBar();
-      }
-      if (event.affectsConfiguration("opencodego.experimentalContextIndicator")) {
-        void syncExperimentalContextIndicator();
       }
     }),
   );
@@ -508,7 +492,7 @@ async function showThinkingEffortPicker(): Promise<void> {
 }
 
 export async function deactivate(): Promise<void> {
-  await disposeContextWindowHookBridge();
+  // no-op: experimental context indicator hooks removed in 0.1.8
 }
 
 function ensureUsageStatusBar(
@@ -530,43 +514,6 @@ function shouldShowUsageStatusBar(): boolean {
   return vscode.workspace
     .getConfiguration("opencodego")
     .get("showUsageStatusBar", true);
-}
-
-function isExperimentalContextIndicatorEnabled(): boolean {
-  return vscode.workspace
-    .getConfiguration("opencodego")
-    .get("experimentalContextIndicator", false);
-}
-
-let hookDiagnosticChannel: vscode.OutputChannel | undefined;
-
-function getHookDiagnosticChannel(): vscode.OutputChannel {
-  if (!hookDiagnosticChannel) {
-    hookDiagnosticChannel = vscode.window.createOutputChannel("OpenCode");
-  }
-  return hookDiagnosticChannel;
-}
-
-function hookDiagnostic(message: string): void {
-  getHookDiagnosticChannel().appendLine(
-    `[${new Date().toISOString()}] [contextWindowHook] ${message}`,
-  );
-}
-
-async function syncExperimentalContextIndicator(): Promise<void> {
-  if (isExperimentalContextIndicatorEnabled()) {
-    const ok = await initializeContextWindowHookBridge(hookDiagnostic);
-    if (!ok) {
-      hookDiagnostic(
-        "experimentalContextIndicator is enabled but the bridge could not activate. " +
-        "The Copilot Chat footer will show default (estimated) usage. " +
-        "This is expected if VS Code internals changed — check for extension updates.",
-      );
-    }
-    return;
-  }
-
-  await disposeContextWindowHookBridge();
 }
 
 function resetUsageStatusBar(): void {
@@ -614,6 +561,150 @@ function updateUsageStatusBar(
     usage,
   );
   usageStatusBarItem.show();
+}
+
+
+function ensureGoUsageStatusBar(context: vscode.ExtensionContext): void {
+  if (goUsageStatusBarItem) return;
+  goUsageStatusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    94,
+  );
+  goUsageStatusBarItem.command = "opencodego.showUsage";
+  context.subscriptions.push(goUsageStatusBarItem);
+  refreshGoUsageStatusBar();
+}
+
+
+
+function refreshGoUsageStatusBar(): void {
+  if (!goUsageStatusBarItem || !goUsageTracker) return;
+  const s = goUsageTracker.getSummary();
+  goUsageStatusBarItem.text    = formatGoUsageStatusBarText(s);
+  goUsageStatusBarItem.tooltip = buildUsageTooltip(s);
+  goUsageStatusBarItem.show();
+}
+
+function buildUsageTooltip(s: ReturnType<GoUsageTracker["getSummary"]>): vscode.MarkdownString {
+  const md = new vscode.MarkdownString("", true);
+  md.isTrusted        = true;
+  md.supportThemeIcons = true;
+  md.supportHtml       = true;
+
+  md.appendMarkdown(`**OpenCode Go** &nbsp;&nbsp; Subscription Limits\n\n`);
+  md.appendMarkdown(`---\n\n`);
+
+  if (!s.hasData) {
+    md.appendMarkdown(`*No usage data yet. Send a chat message to start tracking.*\n`);
+    return md;
+  }
+
+  const bar = (pct: number): string => {
+    const n = Math.round(Math.min(pct, 100) / 10);
+    return "█".repeat(n) + "░".repeat(10 - n);
+  };
+  const dot = (pct: number) => pct >= 80 ? "$(warning)" : pct >= 50 ? "$(circle-large-filled)" : "$(circle-outline)";
+
+  for (const [label, p] of [
+    ["Session (5h rolling)", s.session],
+    ["Weekly",              s.weekly],
+    ["Monthly",             s.monthly],
+  ] as [string, typeof s.session][]) {
+    md.appendMarkdown(`${dot(p.percent)} **${label}**\n\n`);
+    md.appendMarkdown(`\`${bar(p.percent)}\` **${p.percent.toFixed(1)}%** &nbsp; ${usd(p.spent)} / ${usd(p.limit)} &nbsp;·&nbsp; resets in ${rel(p.resetsAt)}\n\n`);
+  }
+
+  md.appendMarkdown(`---\n\n`);
+  md.appendMarkdown(`$(history) **Today** &nbsp; ${usd(s.today.cost)} &nbsp;·&nbsp; ${s.today.requests} req &nbsp;·&nbsp; ${tokens(s.today.tokens)} tokens\n\n`);
+  if (s.yesterday.requests > 0) {
+    md.appendMarkdown(`$(history) **Yesterday** &nbsp; ${usd(s.yesterday.cost)} &nbsp;·&nbsp; ${s.yesterday.requests} req\n\n`);
+  }
+
+  return md;
+}
+
+function showGoUsagePanel(): void {
+  if (!goUsageTracker) return;
+  const s = goUsageTracker.getSummary();
+
+  if (goUsageWebView) {
+    goUsageWebView.webview.html = buildUsageHtml(s);
+    goUsageWebView.reveal(vscode.ViewColumn.Beside, true);
+    return;
+  }
+
+  const panel = vscode.window.createWebviewPanel(
+    "opencodego.usage",
+    "OpenCode Go — Usage",
+    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+    { enableScripts: false, retainContextWhenHidden: false },
+  );
+  panel.webview.html = buildUsageHtml(s);
+  panel.onDidDispose(() => { goUsageWebView = undefined; });
+  goUsageWebView = panel;
+}
+
+function buildUsageHtml(s: ReturnType<GoUsageTracker["getSummary"]>): string {
+  const bar = (pct: number): string => {
+    const clamped = Math.min(pct, 100);
+    const color = clamped >= 80 ? "#f14c4c" : clamped >= 50 ? "#cca700" : "#73c991";
+    return `<div style="display:flex;align-items:center;gap:8px;margin:4px 0 8px">
+      <div style="flex:1;height:6px;background:#3c3c3c;border-radius:3px;overflow:hidden">
+        <div style="width:${clamped}%;height:100%;background:${color};border-radius:3px"></div>
+      </div>
+      <span style="min-width:48px;text-align:right;font-size:12px">${clamped.toFixed(1)}%</span>
+    </div>`;
+  };
+  const row = (label: string, pct: number, spent: number, limit: number, reset: string) =>
+    `<div style="margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+        <span style="font-weight:600;font-size:13px">${label}</span>
+        <span style="color:var(--vscode-descriptionForeground);font-size:11px">Resets in ${reset}</span>
+      </div>
+      ${bar(pct)}
+      <div style="color:var(--vscode-descriptionForeground);font-size:11px">${usd(spent)} / ${usd(limit)} used</div>
+    </div>`;
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+  body{margin:0;padding:20px 24px;font-family:var(--vscode-font-family,sans-serif);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground)}
+  h2{font-size:14px;font-weight:600;margin:0 0 16px;color:var(--vscode-editor-foreground)}
+  hr{border:none;border-top:1px solid var(--vscode-widget-border,#3c3c3c);margin:16px 0}
+  .row{display:flex;gap:24px;font-size:12px;color:var(--vscode-descriptionForeground)}
+  .row b{color:var(--vscode-editor-foreground)}
+</style></head><body>
+<h2>OpenCode Go — Usage</h2>
+${!s.hasData
+  ? `<p style="color:var(--vscode-descriptionForeground)">No usage data yet. Send a chat message to start tracking.</p>`
+  : `${row("Session (5h rolling)", s.session.percent, s.session.spent, s.session.limit, rel(s.session.resetsAt))}
+     ${row("Weekly", s.weekly.percent, s.weekly.spent, s.weekly.limit, rel(s.weekly.resetsAt))}
+     ${row("Monthly", s.monthly.percent, s.monthly.spent, s.monthly.limit, rel(s.monthly.resetsAt))}
+     <hr><div class="row">
+       <span>Today: <b>${usd(s.today.cost)}</b></span>
+       <span>Requests: <b>${s.today.requests}</b></span>
+       <span>Tokens: <b>${tokens(s.today.tokens)}</b></span>
+     </div>
+     ${s.yesterday.requests > 0 ? `<div class="row" style="margin-top:8px">
+       <span>Yesterday: <b>${usd(s.yesterday.cost)}</b></span>
+       <span>Requests: <b>${s.yesterday.requests}</b></span></div>` : ""}`
+}
+</body></html>`;
+}
+
+type _UsageSummary = ReturnType<GoUsageTracker["getSummary"]>;
+
+function usd(v: number): string { return `$${v.toFixed(2)}`; }
+function tokens(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000)     return `${(v / 1_000).toFixed(1)}K`;
+  return v.toString();
+}
+function rel(date: Date): string {
+  const min = Math.max(0, Math.floor((date.getTime() - Date.now()) / 60_000));
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
 }
 
 class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel> {
@@ -959,6 +1050,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       this.apiKeysByModelId.set(effectiveModelId, apiKey);
 
       const capacityNote = CAPACITY_LIMITED_MODEL_NOTES[modelId];
+      const modalityBadges = formatModalityBadges(metadata);
       const baseDetail = this.definition.vendor === ZEN_VENDOR && isFreeZenModel(modelId) ? "Free" : this.definition.displayName;
       const baseTooltip = `${this.definition.displayName} model: ${modelId}`;
       const configurationSchema = modelConfigurationSchema(modelId);
@@ -971,8 +1063,16 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         // Include effective limits in version so VS Code invalidates stale
         // picker metadata after limit changes (eg. 2M -> 262K corrections).
         version: `1.2.0-${MODEL_METADATA_REVISION}-${limits.contextWindow}-${limits.maxOutputTokens}`,
-        detail: capacityNote ? `${baseDetail} • Limited capacity` : baseDetail,
-        tooltip: capacityNote ? `${baseTooltip}\n\nℹ ${capacityNote}` : baseTooltip,
+        detail: capacityNote
+          ? `${baseDetail} • Limited capacity`
+          : modalityBadges
+            ? `${baseDetail} • ${modalityBadges}`
+            : baseDetail,
+        tooltip: capacityNote
+          ? `${baseTooltip}\n\n${capacityNote}`
+          : modalityBadges
+            ? `${baseTooltip}\n\n${modalityBadges}`
+            : baseTooltip,
         category: {
           label: this.definition.displayName,
           order: this.definition.categoryOrder
@@ -983,6 +1083,8 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         capabilities: modelCapabilities(metadata),
         endpointKind: routing.endpointKind,
         provider: this.definition,
+        // Pricing fields (VS Code languageModelPricing proposal)
+        ...modelPricingFields(modelId, this.definition.vendor, metadata),
         // Inline so Copilot Chat picks up the Thinking submenu directly
         // (parity with zelosleone/Opencode-Go-For-Copilot pattern).
         ...(configurationSchema ? { configurationSchema } : {})
@@ -1040,6 +1142,12 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         options.requestInitiator,
       );
       updateUsageStatusBar(this.definition.displayName, rawModelId, summary);
+      if (this.definition.vendor === GO_VENDOR && goUsageTracker) {
+        this.log(`[go-usage] Recording: provider=${summary.providerDisplayName} model=${summary.modelId} promptTokens=${summary.promptTokens ?? "n/a"} completionTokens=${summary.completionTokens ?? "n/a"} cachedTokens=${summary.cachedTokens ?? "n/a"} status=${summary.status ?? "n/a"} error=${summary.errorMessage ?? "none"}`);
+        goUsageTracker.record(summary, metadata.cost);
+        refreshGoUsageStatusBar();
+        this.log(`[go-usage] After record: entries=${goUsageTracker.getSummary().today.requests}`);
+      }
     };
 
     this.log(`Request: initiator=${options.requestInitiator} model=${model.id} rawModel=${rawModelId} endpoint=${routing.endpointKind} metadataSource=${metadata.source} messages=${apiMessages.length} session=${requestHeaders["x-opencode-session"]} request=${requestHeaders["x-opencode-request"]} modelConfiguration=${JSON.stringify(pickThinkingModelConfiguration(requestOverride))} thinking=${JSON.stringify(settings.thinking)} thinkingPayload=${JSON.stringify(thinkingPayload)}`);
@@ -1340,7 +1448,14 @@ function buildAnthropicMessagesRequestBody(
   limits: ModelLimits,
 ): Record<string, unknown> {
   const tools = mapAnthropicTools(options.tools);
-  const thinkingPayload = buildThinkingPayload(modelId, settings.thinking, messagesHaveImages(messages));
+  const rawThinkingPayload = buildThinkingPayload(modelId, settings.thinking, messagesHaveImages(messages));
+  // Qwen models routed to the Anthropic messages endpoint need thinking in
+  // Anthropic-native format ({ type: "enabled"|"disabled" }) rather than the
+  // Qwen-native enable_thinking boolean. If the payload contains
+  // enable_thinking, translate it; otherwise pass through as-is.
+  const thinkingPayload = /^qwen3(?:\.|-)/i.test(modelId) && ("enable_thinking" in rawThinkingPayload || "thinking_budget" in rawThinkingPayload)
+    ? buildQwenAnthropicThinkingPayload(settings.thinking)
+    : rawThinkingPayload;
   const anthropicMessages = buildAnthropicMessages(messages);
 
   return {
@@ -2453,6 +2568,27 @@ function buildThinkingPayload(modelId: string, thinking: ThinkingSettings, hasIm
   return {};
 }
 
+// Translates Qwen thinking settings into Anthropic-native format when Qwen
+// models are routed through the Anthropic messages endpoint. The gateway
+// expects { type: "enabled"|"disabled" } with an optional budget_tokens field,
+// matching the Anthropic thinking API contract.
+function buildQwenAnthropicThinkingPayload(thinking: ThinkingSettings): Record<string, unknown> {
+  if (thinking.qwen === "on") {
+    const budget = thinking.qwenBudget === "auto" ? undefined : Number(thinking.qwenBudget);
+    return {
+      thinking: {
+        type: "enabled",
+        ...(budget !== undefined ? { budget_tokens: budget } : {}),
+      },
+    };
+  }
+  if (thinking.qwen === "off") {
+    return { thinking: { type: "disabled" } };
+  }
+  // "auto" — let the provider decide; send no thinking directive.
+  return {};
+}
+
 function modelLimits(
   metadata: ResolvedModelMetadata,
   settings = getSettings(),
@@ -2499,13 +2635,38 @@ function positiveOverride(value: number): number | undefined {
 }
 
 function modelCapabilities(metadata: ResolvedModelMetadata): CopilotCompatibleCapabilities {
+  // Mirrors the official shape used by `copilotChat`/`byok` providers:
+  // `imageInput` and `toolCalling` are the raw proposed-API fields VS Code
+  // maps to `vision` / `toolCalling` / `agentMode` internally, while
+  // `supportsImageToText` and `supportsToolCalling` are the runtime API
+  // booleans consumed by the `vscode.lm` callers in extensions.
   const supportsVision = metadata.supportsVision;
   return {
     imageInput: supportsVision,
-    toolCalling: 128,
+    toolCalling: true,
     supportsImageToText: supportsVision,
-    supportsToolCalling: true
+    supportsToolCalling: true,
   };
+}
+
+function formatModalityBadges(metadata: ResolvedModelMetadata): string {
+  const badges: string[] = [];
+  if (metadata.supportsVision) {
+    badges.push("Image");
+  }
+  if (metadata.supportsPdf) {
+    badges.push("PDF");
+  }
+  if (metadata.supportsVideo) {
+    badges.push("Video");
+  }
+  if (metadata.supportsAudio && !metadata.supportsVideo && !metadata.supportsPdf) {
+    badges.push("Audio");
+  }
+  if (metadata.supportsAudio && (metadata.supportsVideo || metadata.supportsPdf)) {
+    badges.push("Audio");
+  }
+  return badges.join(" · ");
 }
 
 function shouldHideDeprecatedModel(
@@ -2534,6 +2695,100 @@ function resolveRawModelId(modelId: string): string {
 
 function isFreeZenModel(modelId: string): boolean {
   return modelId.endsWith("-free") || FREE_ZEN_MODEL_IDS.has(modelId);
+}
+
+function isFreeModel(modelId: string, vendor: ProviderDefinition["vendor"]): boolean {
+  return (
+    FREE_ZEN_MODEL_IDS.has(modelId) ||
+    modelId.endsWith("-free")
+  );
+}
+
+/**
+ * Returns pricing fields for VS Code's language model pricing proposal
+ * (`vscode.proposed.languageModelPricing`).
+ *
+ * Cost data from models.dev is in USD; VS Code expects AI Credits
+ * (1 credit = $0.01 USD). We convert by multiplying by 100 so the
+ * pricing table shows values comparable to Copilot's own models.
+ *
+ * The `pricing` string matches the format used by the Copilot extension's
+ * `formatPricingLabel` (`In: $X · Out: $Y /1M tokens`) so the picker hover
+ * reads consistently across providers.
+ */
+function modelPricingFields(
+  modelId: string,
+  vendor: ProviderDefinition["vendor"],
+  metadata: ResolvedModelMetadata,
+): {
+  pricing?: string;
+  priceCategory?: string;
+  inputCost?: number;
+  outputCost?: number;
+  cacheCost?: number;
+} {
+  const free = isFreeModel(modelId, vendor);
+
+  if (free) {
+    return { pricing: "Free", priceCategory: "low" };
+  }
+
+  const cost = metadata.cost;
+  if (cost) {
+    const inputCredits = Math.round(cost.input * 100);
+    const outputCredits = Math.round(cost.output * 100);
+    const cacheCredits = cost.cache_read !== undefined
+      ? Math.round(cost.cache_read * 100)
+      : undefined;
+
+    const fmt = (v: number) => `$${v.toFixed(v < 0.1 ? 2 : 1)}`;
+    return {
+      pricing: `In: ${fmt(cost.input)} · Out: ${fmt(cost.output)} /1M tokens`,
+      priceCategory: costCategory(cost),
+      inputCost: inputCredits,
+      outputCost: outputCredits,
+      ...(cacheCredits !== undefined ? { cacheCost: cacheCredits } : {}),
+    };
+  }
+
+  // No models.dev cost data: fall back to a neutral label so the picker
+  // shows something instead of pretending we know the price.
+  return {
+    pricing: `${vendor === GO_VENDOR ? "Go" : "Zen"} subscription`,
+  };
+}
+
+/**
+ * Maps per-million-token USD cost to the four-tier `priceCategory` labels
+ * (`low` / `medium` / `high` / `very_high`) that VS Code's language model
+ * picker renders as a visual cost indicator.
+ *
+ * VS Code's own `getPriceCategoryLabel` (chatModelPicker.ts) just translates
+ * the string but does not assign thresholds - the Copilot extension uses
+ * billing multipliers and a weighted 3:1 input:output blend to mirror the
+ * user's billing mix. We follow the same 3:1 weighting here so our category
+ * lines up with what the user sees for the official Copilot models:
+ *
+ * - low       : qwen3.5-plus, deepseek-v4-flash-free, mimo-v2-flash-free
+ * - medium    : kimi-k2.6, gemini-3-flash, claude-haiku-4-5, gpt-5,
+ *               gpt-5.2, gpt-5.4, claude-sonnet-4-6
+ * - high      : claude-opus-4-5, claude-opus-4-7, gpt-5.5
+ * - very_high : gpt-5.4-pro, gpt-5.5-pro, claude-opus-4-1
+ *
+ * Free models (`cost.input == 0 && cost.output == 0`) are reported as `low`
+ * because that is the bucket VS Code uses for "Free" entries in the picker.
+ */
+function costCategory(cost: { input: number; output: number }): string {
+  if (cost.input <= 0 && cost.output <= 0) {
+    return "low";
+  }
+  // Mirrors Copilot's 3:1 input:output blend (input tokens are usually the
+  // larger share of a request, so they get more weight than raw sum).
+  const weighted = cost.input * 3 + cost.output;
+  if (weighted <= 2) return "low";
+  if (weighted <= 25) return "medium";
+  if (weighted <= 50) return "high";
+  return "very_high";
 }
 
 function formatModelName(modelId: string): string {

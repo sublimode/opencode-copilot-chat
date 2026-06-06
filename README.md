@@ -3,7 +3,7 @@
 > **Use [OpenCode](https://opencode.ai) models directly in GitHub Copilot Chat — no Copilot Pro/Enterprise subscription needed. Just bring your own API key (BYOK).**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![VS Code](https://img.shields.io/badge/VS%20Code-1.120%2B-blue)](https://code.visualstudio.com/)
+[![VS Code](https://img.shields.io/badge/VS%20Code-1.118%2B-blue)](https://code.visualstudio.com/)
 [![OpenCode](https://img.shields.io/badge/OpenCode-Go%20|%20Zen-6c47ff)](https://opencode.ai)
 
 ---
@@ -28,18 +28,20 @@ This lets you pick and use OpenCode models directly from the Copilot Chat model 
 - **TTL-cached metadata** — merges live `/models` metadata with a 6-hour models.dev snapshot to resolve context window, output limits, image support, and deprecation state
 - **Bundled fallback** — keeps the picker usable offline with an internal fallback catalog when live metadata cannot be refreshed yet
 - **Tool-calling support** — forwards tool schemas using the request shape each routed model family expects
-- **Native transport compatibility** — routes Zen GPT to `/responses`, Zen Gemini to the documented Google-style endpoint, Zen Claude and documented Qwen 3.5/3.6 families to `/messages`, Go MiniMax and Qwen 3.5/3.6/3.7 families to `/messages`, and the remaining models to `/chat/completions`
+- **Native transport compatibility** — routes Zen GPT to `/responses`, Zen Gemini to the documented Google-style endpoint, Zen Claude to `/messages`, Go MiniMax to `/messages`, and the remaining models (including all Qwen families) to `/chat/completions`
+- **Cost and pricing metadata** — exposes per-model input, output, and cache costs from the live models.dev registry so the VS Code model picker can display real pricing
+- **Modality detection** — surfaces audio, video, and PDF input support in model tooltips alongside the existing vision indicator
+- **Per-model Thinking controls** — configurable reasoning effort for DeepSeek, GLM, Kimi, and Qwen model families via dedicated settings
 - **Safer requests** — adds sticky routing headers plus request and stream idle timeouts with clearer rate-limit/quota errors in VS Code
-- **Diagnostics command** — one-click markdown report showing exactly which models VS Code has registered plus recent request summaries for transport, tokens, latency, and errors
+- **Diagnostics commands** — one-click markdown report showing exactly which models VS Code has registered, a model picker diagnostic across all vendors, and recent request summaries for transport, tokens, latency, and errors
 - **Usage status bar** — shows the latest prompt/output/total/cache summary after each OpenCode response
 - **Normalized usage markers** — emits a normalized usage data part for each response so future Copilot/BYOK integrations can consume prompt/output/cache metadata directly
-- **Experimental context footer hook** — optional opt-in integration that attempts to fill the Copilot Chat footer with real BYOK usage using VS Code internals
 
 ---
 
 ## Requirements
 
-- VS Code **1.120.0** or higher with the Language Model Chat Provider API
+- VS Code **1.118.0** or higher with the Language Model Chat Provider API
 - **GitHub Copilot Chat** extension — [install from marketplace](https://marketplace.visualstudio.com/items?itemName=GitHub.copilot-chat) (required — this extension only adds models *into* Copilot Chat)
 - Sign in to GitHub Copilot Chat (a personal GitHub account is sufficient — **no** Copilot Pro/Enterprise needed for BYOK)
 - An **OpenCode Go API key** for Go models, or an **OpenCode Zen API key** for Zen free models — get one at [opencode.ai](https://opencode.ai)
@@ -77,6 +79,8 @@ For advanced usage, you can also run these commands via the Command Palette (`Cm
 | `OpenCode Go: Set API Key` | Store or update a legacy fallback OpenCode Go API key |
 | `OpenCode Go: Diagnostics` | Show a markdown report of registered OpenCode Go models and recent Go request summaries |
 | `OpenCode Zen: Diagnostics` | Show a markdown report of registered OpenCode Zen models and recent Zen request summaries |
+| `OpenCode: Model Picker Diagnostics` | Show all registered models across OpenCode Go, Zen, and Copilot vendors with full metadata |
+| `OpenCode: Set Thinking Effort…` | Configure per-family Thinking mode (DeepSeek, GLM, Kimi, Qwen) and Qwen thinking budget |
 
 > **Note:** The native BYOK flow via **Language Models** (gear icon ⚙) is recommended. VS Code will ask for a group name, then the matching API key. Go and Zen are separate provider groups, so both can be active at the same time.
 
@@ -93,10 +97,12 @@ For advanced usage, you can also run these commands via the Command Palette (`Cm
 | `opencodego.requestTimeoutSeconds` | `number` | `600` | Total request timeout for OpenCode Go and Zen API calls |
 | `opencodego.streamIdleTimeoutSeconds` | `number` | `120` | Cancels a request if the response stream stops sending chunks for too long |
 | `opencodego.showUsageStatusBar` | `boolean` | `true` | Show the latest OpenCode usage summary in the VS Code status bar |
-| `opencodego.experimentalContextIndicator` | `boolean` | `false` | Experimental attempt to fill the Copilot Chat context indicator with real BYOK token usage |
-| `opencodego.freeOnly`      | `boolean` | `true`  | Limit OpenCode Zen to free models only. Disable to include paid Zen models in the picker |
-
-When `opencodego.experimentalContextIndicator` is enabled, the extension installs an internal bridge that maps OpenCode request ids back to VS Code chat request ids and injects normalized prompt/output usage into the Copilot Chat footer. This path is intentionally opt-in because it depends on VS Code internals and can break across updates.
+| `opencodego.freeOnly` | `boolean` | `true` | Limit OpenCode Zen to free models only. Disable to include paid Zen models in the picker |
+| `opencodego.thinking.deepseek` | `string` | `"off"` | Thinking mode for DeepSeek models (`off`, `high`, `max`) |
+| `opencodego.thinking.glm` | `string` | `"off"` | Thinking mode for GLM models (`on`, `off`) |
+| `opencodego.thinking.kimi` | `string` | `"off"` | Thinking mode for Kimi models (`on`, `off`) |
+| `opencodego.thinking.qwen` | `string` | `"off"` | Thinking mode for Qwen models (`auto`, `on`, `off`) |
+| `opencodego.thinking.qwenBudget` | `string` | `"auto"` | Optional `thinking_budget` for Qwen models (`auto`, `4096`, `16384`, `32768`, `81920`). Ignored when Qwen thinking is `off` |
 
 ---
 
@@ -176,11 +182,10 @@ https://opencode.ai/zen/v1/chat/completions       (Zen)
 The extension also routes these families automatically:
 
 - OpenCode Go MiniMax M2 models (`minimax-m2.*`) → `/messages`
-- OpenCode Go Qwen 3.5/3.6/3.7 models (`qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-max`) → `/messages`
 - OpenCode Zen Claude models (`claude-*`) → `/messages`
-- OpenCode Zen Qwen 3.5/3.6 models (`qwen3.5-plus`, `qwen3.6-plus`, `qwen3.6-plus-free`) → `/messages`
 - OpenCode Zen GPT models (`gpt-*`) → `/responses`
 - OpenCode Zen Gemini models (`gemini-*`) → `/models/{model}:streamGenerateContent?alt=sse`
+- All other models (including all Qwen families) → `/chat/completions`
 
 ```
 https://opencode.ai/zen/go/v1/messages
@@ -189,7 +194,7 @@ https://opencode.ai/zen/v1/responses
 https://opencode.ai/zen/v1/models/gemini-3.5-flash:streamGenerateContent?alt=sse
 ```
 
-The plugin now follows the current OpenCode endpoint docs for the Qwen families: Go `qwen3.5-plus`, `qwen3.6-plus`, and `qwen3.7-max`, plus Zen `qwen3.5-plus` and `qwen3.6-plus`, are sent through `/messages` with the Anthropic-compatible request shape expected by the OpenCode gateway. `qwen3.6-plus-free` follows the same Zen Qwen transport family.
+All Qwen models (`qwen3.5-plus`, `qwen3.6-plus`, `qwen3.6-plus-free`, `qwen3.7-max`) are routed through `/chat/completions` because they use OpenAI-compatible tool calling natively (`choices[].delta.tool_calls`). Routing them to the Anthropic Messages API (`/messages`) caused tool calls to break because Anthropic uses a different `tool_use` content block format.
 
 ---
 

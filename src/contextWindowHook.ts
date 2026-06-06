@@ -43,9 +43,10 @@ const queuedProgressLocalRequestIds: string[] = [];
 const queuedProgressLocalRequestIdSet = new Set<string>();
 
 function isContextIndicatorEnabled(): boolean {
-  return vscode.workspace
-    .getConfiguration("opencodego")
-    .get("experimentalContextIndicator", false);
+  // Always enabled — the flag was removed in 0.1.8.
+  // The bridge is now always active; if the proxy can't be captured,
+  // it silently no-ops.
+  return true;
 }
 
 function createUsageChunk(usage: ContextWindowUsage): {
