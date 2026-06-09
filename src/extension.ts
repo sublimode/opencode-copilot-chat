@@ -83,7 +83,7 @@ const KNOWN_UNAVAILABLE_MODEL_IDS = new Set([
 const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const OPEN_CODE_CLIENT = "vscode-copilot-chat";
-const OPEN_CODE_USER_AGENT = "opencode-copilot-chat/0.1.7 VSCode";
+const OPEN_CODE_USER_AGENT = "opencode-copilot-chat/0.2.3 VSCode";
 
 const PROVIDERS: Record<ProviderDefinition["vendor"], ProviderDefinition> = {
   [GO_VENDOR]: {
@@ -394,11 +394,7 @@ interface RecentTransportSummary extends TransportRequestSummary {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  const goUsageLogChannel = vscode.window.createOutputChannel("OpenCode Go Usage");
-  context.subscriptions.push(goUsageLogChannel);
-  goUsageTracker = new GoUsageTracker(context, (msg) => {
-    goUsageLogChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
-  });
+  goUsageTracker = new GoUsageTracker(context);
   ensureUsageStatusBar(context);
   ensureGoUsageStatusBar(context);
   const goProvider = new OpenCodeProvider(context, PROVIDERS[GO_VENDOR]);
@@ -917,7 +913,6 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     }
 
     const statusBar = vscode.window.setStatusBarMessage(`$(loading~spin) Testing ${this.definition.displayName} connection...`);
-    this.log(`Testing connection to ${this.definition.chatCompletionsUrl}`);
 
     try {
       const response = await fetch(this.definition.chatCompletionsUrl, {
@@ -936,8 +931,6 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
 
       const responseText = await response.text();
       statusBar.dispose();
-      this.log(`Test response (${response.status}): ${responseText}`);
-      this.getOutputChannel().show(true);
 
       if (response.ok) {
         vscode.window.showInformationMessage(`${this.definition.displayName}: Connection OK (HTTP ${response.status}). Check Output panel for details.`);
@@ -947,8 +940,6 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     } catch (error) {
       statusBar.dispose();
       const message = error instanceof Error ? error.message : String(error);
-      this.log(`Test connection error: ${message}`);
-      this.getOutputChannel().show(true);
       vscode.window.showErrorMessage(`${this.definition.displayName}: Connection error - ${message}`);
     }
   }
@@ -1032,7 +1023,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     const settings = getSettings();
     const metadataSnapshot = await this.getMetadataSnapshot();
 
-    return models.map((modelId) => {
+    const result = models.map((modelId) => {
       const metadata = this.resolveModelMetadata(modelId, metadataSnapshot);
       const routing = resolveModelRouting(modelId, this.definition);
       const effectiveModelId = toEffectiveModelId(modelId, this.definition.vendor);
@@ -1081,10 +1072,10 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         ...(configurationSchema ? { configurationSchema } : {})
       };
 
-      this.log(`Model registered: id=${info.id} family=${info.family} metadataSource=${metadata.source} endpointKind=${routing.endpointKind} endpointUrl=${routing.endpointUrl} configurationSchema=${configurationSchema ? JSON.stringify(configurationSchema) : "none"}`);
-
       return info;
     });
+
+    return result;
   }
 
   async provideLanguageModelChatResponse(
@@ -1134,17 +1125,10 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       );
       updateUsageStatusBar(this.definition.displayName, rawModelId, summary);
       if (this.definition.vendor === GO_VENDOR && goUsageTracker) {
-        this.log(`[go-usage] Recording: provider=${summary.providerDisplayName} model=${summary.modelId} promptTokens=${summary.promptTokens ?? "n/a"} completionTokens=${summary.completionTokens ?? "n/a"} cachedTokens=${summary.cachedTokens ?? "n/a"} status=${summary.status ?? "n/a"} error=${summary.errorMessage ?? "none"}`);
         goUsageTracker.record(summary, metadata.cost);
         refreshGoUsageStatusBar();
-        this.log(`[go-usage] After record: entries=${goUsageTracker.getSummary().today.requests}`);
       }
     };
-
-    this.log(`Request: initiator=${options.requestInitiator} model=${model.id} rawModel=${rawModelId} endpoint=${routing.endpointKind} metadataSource=${metadata.source} messages=${apiMessages.length} session=${requestHeaders["x-opencode-session"]} request=${requestHeaders["x-opencode-request"]} modelConfiguration=${JSON.stringify(pickThinkingModelConfiguration(requestOverride))} thinking=${JSON.stringify(settings.thinking)} thinkingPayload=${JSON.stringify(thinkingPayload)}`);
-    if (settings.debugReasoning) {
-      this.log("Reasoning debug is enabled. Provider reasoning_content will be written to this output channel when available.");
-    }
 
     try {
       const contextWindowOutputBuffer = limits.advertisedMaxOutputTokens;
@@ -1197,7 +1181,6 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           },
           stripThinkTags: settings.stripThinkTags,
         });
-        this.log(`Request completed: model=${model.id}`);
         return;
       }
 
@@ -1253,7 +1236,6 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         },
         stripThinkTags: settings.stripThinkTags,
       });
-      this.log(`Request completed: model=${model.id}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`ERROR model=${model.id}: ${message}`);
@@ -1309,14 +1291,9 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       );
 
       const removedModelIds = uniqueModelIds.filter((modelId) => !filteredModelIds.includes(modelId));
-      if (removedModelIds.length) {
-        this.log(`Filtered unavailable/deprecated models: ${removedModelIds.join(", ")}`);
-      }
 
       return filteredModelIds;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log(`Could not fetch model status metadata from models.dev. Applying local unavailable model filter only. ${message}`);
       return uniqueModelIds.filter((modelId) => !KNOWN_UNAVAILABLE_MODEL_IDS.has(modelId));
     }
   }
@@ -1378,9 +1355,6 @@ async function refreshOpenCodeModelMetadata(
     const snapshot = normalizeModelsDevSnapshot(data);
     modelMetadataSnapshot = snapshot;
     await context.globalState.update(MODEL_METADATA_CACHE_KEY, snapshot);
-    output?.appendLine(
-      `[metadata] refreshed models.dev cache go=${Object.keys(snapshot.providers[GO_VENDOR]).length} zen=${Object.keys(snapshot.providers[ZEN_VENDOR]).length}`,
-    );
     return snapshot;
   })()
     .catch((error) => {
@@ -1390,19 +1364,11 @@ async function refreshOpenCodeModelMetadata(
           MODEL_METADATA_CACHE_KEY,
         );
       if (cached) {
-        const message = error instanceof Error ? error.message : String(error);
-        output?.appendLine(
-          `[metadata] refresh failed, using cached snapshot: ${message}`,
-        );
         modelMetadataSnapshot = cached;
         return cached;
       }
 
-      const message = error instanceof Error ? error.message : String(error);
       const fallback = bundledModelMetadataSnapshot();
-      output?.appendLine(
-        `[metadata] refresh failed, using bundled snapshot: ${message}`,
-      );
       modelMetadataSnapshot = fallback;
       return fallback;
     })
@@ -2234,7 +2200,7 @@ function estimateDataPartTokenCount(part: vscode.LanguageModelDataPart): number 
   }
 
   if (part.mimeType.startsWith("text/") || part.mimeType === "application/json") {
-    return estimateTokenCount(Buffer.from(part.data).toString("utf8"));
+    return estimateTokenCount(new TextDecoder().decode(part.data));
   }
 
   return Math.max(1, Math.ceil(part.data.byteLength / 4));

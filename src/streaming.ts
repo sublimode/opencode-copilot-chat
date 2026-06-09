@@ -20,7 +20,6 @@ import {
   reportUsageToContextWindowForRequest,
   setContextWindowOutputBufferForRequest,
 } from "./contextWindowHookBridge";
-import { formatUsageLogLine } from "./usage";
 
 export interface StreamRequestOptions {
   url: string;
@@ -95,9 +94,6 @@ export async function streamChatCompletions(
     options.progress,
     options.requestHeaders["x-opencode-request"],
   );
-  options.output?.appendLine(
-    `[stream-summary model=${options.modelId}] textChars=${extractor.emittedText} toolCalls=${extractor.emittedTools} reasoningChars=${extractor.reasoningChars}`,
-  );
   if (extractor.emittedText === 0 && extractor.emittedTools === 0) {
     options.output?.appendLine(
       `[warn] empty response from model=${options.modelId} (no text, no tool calls, no reasoning). Try a different free model or enable opencodego.debugReasoning to inspect raw SSE.`,
@@ -126,9 +122,6 @@ export async function streamAnthropicMessages(
     options.progress,
     options.requestHeaders["x-opencode-request"],
   );
-  options.output?.appendLine(
-    `[stream-summary model=${options.modelId}] textChars=${extractor.emittedText} toolCalls=${extractor.emittedTools} reasoningChars=${extractor.reasoningChars}`,
-  );
 }
 
 export async function streamResponsesApi(
@@ -155,9 +148,6 @@ export async function streamResponsesApi(
   extractor.flushReasoningFallback(
     options.progress,
     options.requestHeaders["x-opencode-request"],
-  );
-  options.output?.appendLine(
-    `[stream-summary model=${options.modelId}] textChars=${extractor.emittedText} toolCalls=${extractor.emittedTools} reasoningChars=${extractor.reasoningChars}`,
   );
 }
 
@@ -186,9 +176,6 @@ export async function streamGoogleGenerateContent(
   extractor.flushReasoningFallback(
     options.progress,
     options.requestHeaders["x-opencode-request"],
-  );
-  options.output?.appendLine(
-    `[stream-summary model=${options.modelId}] textChars=${extractor.emittedText} toolCalls=${extractor.emittedTools} reasoningChars=${extractor.reasoningChars}`,
   );
 }
 
@@ -298,19 +285,6 @@ async function streamOpenCodeResponse(
       ...extra,
     };
 
-    options.output?.appendLine(
-      `[response-summary] status=${summary.status ?? "n/a"} durationMs=${summary.durationMs} ttfbMs=${summary.ttfbMs ?? "n/a"} promptTokens=${summary.promptTokens ?? "n/a"} completionTokens=${summary.completionTokens ?? "n/a"} totalTokens=${summary.totalTokens ?? "n/a"} cachedTokens=${summary.cachedTokens ?? "n/a"} finishReason=${summary.finishReason ?? "<unknown>"} totalBytes=${summary.totalBytes} totalEvents=${summary.totalEvents}`,
-    );
-    const usageLog = formatUsageLogLine({
-      promptTokens: summary.promptTokens,
-      completionTokens: summary.completionTokens,
-      totalTokens: summary.totalTokens,
-      cachedTokens: summary.cachedTokens,
-      finishReason: summary.finishReason,
-    });
-    if (usageLog) {
-      options.output?.appendLine(`[usage] ${usageLog}`);
-    }
     options.onTransportSummary?.(summary);
 
     if (localRequestId) {
@@ -347,9 +321,6 @@ async function streamOpenCodeResponse(
     }
 
     const payload = JSON.stringify(options.body);
-    options.output?.appendLine(
-      `[request] url=${options.url} payloadBytes=${payload.length} requestTimeoutMs=${options.requestTimeoutMs} streamIdleTimeoutMs=${options.streamIdleTimeoutMs}`,
-    );
     const response = await fetch(options.url, {
       method: "POST",
       headers: {
@@ -363,9 +334,6 @@ async function streamOpenCodeResponse(
 
     responseStatus = response.status;
     responseContentType = response.headers.get("content-type") ?? "";
-    options.output?.appendLine(
-      `[http] ${response.status} ${response.statusText} content-type=${responseContentType || "<none>"}`,
-    );
     const rateLimitSummary = formatRateLimitSummary(
       readRateLimitInfo(response.headers),
     );
@@ -475,9 +443,6 @@ async function streamOpenCodeResponse(
       }
     }
 
-    options.output?.appendLine(
-      `[sse-stats] totalBytes=${totalBytes} totalEvents=${totalEvents} bufferTailLen=${buffer.length}`,
-    );
     emitSummary(totalBytes, totalEvents, { rateLimitSummary });
   } catch (error) {
     if (abortReason === "cancelled") {
