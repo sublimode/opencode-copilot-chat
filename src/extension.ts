@@ -8,6 +8,7 @@ import {
   MODELS_DEV_API_URL,
   bundledModelMetadataSnapshot,
   fallbackModelMetadata,
+  getContextSizeOptions,
   hasExplicitModelLimits,
   isFreshModelMetadata,
   normalizeLiveModelMetadata,
@@ -16,6 +17,7 @@ import {
   toEffectiveModelId,
   type BaseModelLimits,
   type CachedModelMetadataSnapshot,
+  type ContextSizeOption,
   type ModelCost,
   type ModelMetadataFields,
   type ModelsDevResponse,
@@ -245,12 +247,25 @@ interface PendingToolCall {
   arguments: string;
 }
 
+/**
+ * Reasoning effort levels per model family, sourced from the upstream
+ * OpenCode provider transform (anomalyco/opencode, packages/opencode/src/provider/transform.ts):
+ *
+ *   WIDELY_SUPPORTED_EFFORTS = ["low", "medium", "high"]
+ *   OPENAI_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"]
+ *
+ * For @ai-sdk/openai-compatible (Mimo, and most models routed through
+ * chat-completions): the default is WIDELY_SUPPORTED_EFFORTS = ["low", "medium", "high"].
+ * DeepSeek V4 on openai-compatible additionally adds "max" → ["low", "medium", "high", "max"].
+ */
 interface ThinkingSettings {
-  deepseek: "off" | "high" | "max";
+  deepseek: "off" | "low" | "medium" | "high" | "max";
   glm: "on" | "off";
   kimi: "on" | "off";
+  minimax: "off" | "on";
   qwen: "auto" | "on" | "off";
   qwenBudget: "auto" | "4096" | "16384" | "32768" | "81920";
+  mimo: "off" | "low" | "medium" | "high";
 }
 
 interface ApiSettings {
@@ -469,9 +484,11 @@ async function showModelPickerDiagnostics(): Promise<void> {
 
 async function showThinkingEffortPicker(): Promise<void> {
   const families: { label: string; key: keyof ThinkingSettings; options: string[] }[] = [
-    { label: "DeepSeek (deepseek-v4-*)", key: "deepseek", options: ["off", "high", "max"] },
+    { label: "DeepSeek (deepseek-v4-*)", key: "deepseek", options: ["off", "low", "medium", "high", "max"] },
     { label: "GLM (glm-5, glm-5.1)", key: "glm", options: ["on", "off"] },
     { label: "Kimi (kimi-k2.*)", key: "kimi", options: ["on", "off"] },
+    { label: "Mimo (mimo-v2.*)", key: "mimo", options: ["off", "low", "medium", "high"] },
+    { label: "MiniMax (minimax-m*)", key: "minimax", options: ["off", "on"] },
     { label: "Qwen (qwen3.*)", key: "qwen", options: ["auto", "on", "off"] },
     { label: "Qwen Thinking Budget", key: "qwenBudget", options: ["auto", "4096", "16384", "32768", "81920"] }
   ];
@@ -1044,7 +1061,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       const modalityBadges = formatModalityBadges(metadata);
       const baseDetail = this.definition.vendor === ZEN_VENDOR && isFreeZenModel(modelId) ? "Free" : this.definition.displayName;
       const baseTooltip = `${this.definition.displayName} model: ${modelId}`;
-      const configurationSchema = modelConfigurationSchema(modelId);
+      const configurationSchema = modelConfigurationSchema(modelId, metadata);
 
       const info: OpenCodeModel = {
         id: effectiveModelId,
@@ -1113,6 +1130,10 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       ...baseSettings,
       thinking: applyRequestThinkingOverride(rawModelId, baseSettings.thinking, requestOverride)
     };
+    // Extract the context-size tier selected by the user (if any)
+    const contextSizeOverride = typeof requestOverride?.contextSize === "number"
+      ? requestOverride.contextSize
+      : undefined;
     const metadataSnapshot = await this.getMetadataSnapshot();
     const metadata = this.resolveModelMetadata(rawModelId, metadataSnapshot);
     const routing = resolveModelRouting(rawModelId, this.definition);
@@ -1142,7 +1163,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       }
     }
 
-    const limits = modelLimits(metadata, settings);
+    const limits = modelLimits(metadata, settings, contextSizeOverride);
     const hasImageInput = messagesHaveImages(trimmedMessages);
     const thinkingPayload = buildThinkingPayload(rawModelId, settings.thinking, hasImageInput);
     const requestHeaders = buildOpenCodeRequestHeaders(
@@ -2350,33 +2371,146 @@ function hasMessagePayload(message: ApiMessage): boolean {
 // Detect which Thinking family a raw model id belongs to. Used both to render
 // the per-model picker submenu (configurationSchema) and to map the user's
 // per-request selection back to the right OpenCode request field.
-type ThinkingFamily = "deepseek" | "glm" | "kimi" | "qwen" | null;
+type ThinkingFamily = "deepseek" | "glm" | "kimi" | "minimax" | "qwen" | "mimo" | null;
 function thinkingFamily(modelId: string): ThinkingFamily {
   if (/^deepseek-/i.test(modelId)) return "deepseek";
   if (/^glm-/i.test(modelId)) return "glm";
   if (/^kimi-/i.test(modelId)) return "kimi";
+  if (/^minimax-/i.test(modelId)) return "minimax";
   if (/^qwen3(?:\.|-)/i.test(modelId)) return "qwen";
+  if (/^mimo-/i.test(modelId)) return "mimo";
   return null;
 }
 
 // Per-family JSON-Schema describing the native model-picker controls rendered
 // by VS Code 1.120. Keep the primary property name aligned with VS Code's
 // BYOK reasoning control so builds with narrower assumptions still recognize it.
-function modelConfigurationSchema(modelId: string): vscode.LanguageModelConfigurationSchema | undefined {
-  const family = thinkingFamily(modelId);
-  if (!family) return undefined;
+// Accepts optional metadata for dynamic fallback: any model with
+// `reasoning: true` in its resolved metadata gets a generic off/on schema
+// even if no hardcoded family match exists.
+function modelConfigurationSchema(
+  modelId: string,
+  metadata?: ResolvedModelMetadata,
+): vscode.LanguageModelConfigurationSchema | undefined {
+  const properties: Record<string, unknown> = {};
 
+  // --- Thinking / Reasoning Effort ---
+  // Priority 1: if models.dev provides explicit reasoning_options, use those.
+  // Priority 2: fall back to family-based hardcoded values.
+  // Priority 3: dynamic fallback for any model with reasoning: true.
+  const builtinSchema = buildFamilyThinkingSchema(modelId, metadata);
+
+  if (builtinSchema) {
+    Object.assign(properties, builtinSchema.properties);
+  }
+
+  // --- Context Size (tiered pricing) ---
+  const contextSizeOptions = metadata?.cost ? getContextSizeOptions(metadata.cost, metadata.contextWindow) : undefined;
+  if (contextSizeOptions && contextSizeOptions.length > 0) {
+    properties.contextSize = {
+      type: "number",
+      title: "Context Size",
+      enum: contextSizeOptions.map(o => o.value),
+      enumItemLabels: contextSizeOptions.map(o => o.label),
+      enumDescriptions: contextSizeOptions.map(o => o.description),
+      default: contextSizeOptions.find(o => o.isDefault)?.value ?? contextSizeOptions[0].value,
+      group: "tokens"
+    };
+  }
+
+  if (Object.keys(properties).length === 0) {
+    return undefined;
+  }
+
+  return { type: "object", properties: properties as vscode.LanguageModelConfigurationSchema["properties"] };
+}
+
+/**
+ * Build the thinking-effort portion of the configuration schema.
+ * Priority: models.dev `reasoningOptions` > family-based hardcoded > dynamic fallback.
+ */
+function buildFamilyThinkingSchema(
+  modelId: string,
+  metadata?: ResolvedModelMetadata,
+): { properties: Record<string, unknown> } | undefined {
+  const family = thinkingFamily(modelId);
+  const opts = metadata?.reasoningOptions;
+
+  // --- Priority 1: explicit reasoning_options from models.dev ---
+  if (opts && opts.length > 0) {
+    // Collect unique effort values across all effort-type options
+    const effortValues = opts
+      .filter(o => o.type === "effort" && Array.isArray(o.values) && o.values.length > 0)
+      .flatMap(o => o.values!)
+      .filter((v, i, a) => a.indexOf(v) === i);
+
+    // Check if a toggle-type option exists
+    const hasToggle = opts.some(o => o.type === "toggle");
+
+    // Build the enum options:
+    // - If toggle exists, "off" is the default (user can toggle off)
+    // - If effort values exist, those become additional options
+    // - If neither toggle nor effort, but there are options, treat as on/off
+    if (hasToggle || effortValues.length > 0) {
+      const enumOptions: string[] = [];
+      const enumLabels: string[] = [];
+      const enumDescriptions: string[] = [];
+
+      // "off" is always the first option when toggle is present
+      if (hasToggle) {
+        enumOptions.push("off");
+        enumLabels.push("Off");
+        enumDescriptions.push("Fastest responses");
+      }
+
+      // Add effort levels
+      for (const v of effortValues) {
+        enumOptions.push(v);
+        // Capitalize first letter
+        enumLabels.push(v.charAt(0).toUpperCase() + v.slice(1));
+        // Generate description
+        switch (v) {
+          case "low": enumDescriptions.push("Faster responses with less reasoning"); break;
+          case "medium": enumDescriptions.push("Balanced reasoning and speed"); break;
+          case "high": enumDescriptions.push("Greater reasoning depth but slower"); break;
+          case "xhigh": enumDescriptions.push("Maximum reasoning depth"); break;
+          case "max": enumDescriptions.push("Maximum reasoning effort"); break;
+          default: enumDescriptions.push(`Effort: ${v}`);
+        }
+      }
+
+      if (enumOptions.length > 0) {
+        const schema: Record<string, unknown> = {
+          type: "string",
+          title: "Thinking Effort",
+          enum: enumOptions,
+          enumItemLabels: enumLabels,
+          enumDescriptions,
+          default: "off",
+          group: "navigation"
+        };
+
+        return { properties: { reasoningEffort: schema } };
+      }
+    }
+
+    // Fallthrough: if options exist but none matched, treat as reasoning enabled
+    // (the caller already handles reasoning:true below)
+  }
+
+  // --- Priority 2: family-based hardcoded ---
   if (family === "deepseek") {
     return {
-      type: "object",
       properties: {
         reasoningEffort: {
           type: "string",
           title: "Thinking Effort",
-          enum: ["off", "high", "max"],
-          enumItemLabels: ["Off", "High", "Max"],
+          enum: ["off", "low", "medium", "high", "max"],
+          enumItemLabels: ["Off", "Low", "Medium", "High", "Max"],
           enumDescriptions: [
             "Fastest responses",
+            "Minimal reasoning",
+            "Balanced reasoning",
             "More reasoning",
             "Maximum reasoning"
           ],
@@ -2387,9 +2521,29 @@ function modelConfigurationSchema(modelId: string): vscode.LanguageModelConfigur
     };
   }
 
+  if (family === "mimo") {
+    return {
+      properties: {
+        reasoningEffort: {
+          type: "string",
+          title: "Thinking Effort",
+          enum: ["off", "low", "medium", "high"],
+          enumItemLabels: ["Off", "Low", "Medium", "High"],
+          enumDescriptions: [
+            "Fastest responses",
+            "Minimal reasoning",
+            "Balanced reasoning",
+            "Enable reasoning"
+          ],
+          default: "off",
+          group: "navigation"
+        }
+      }
+    };
+  }
+
   if (family === "glm" || family === "kimi") {
     return {
-      type: "object",
       properties: {
         reasoningEffort: {
           type: "string",
@@ -2407,39 +2561,82 @@ function modelConfigurationSchema(modelId: string): vscode.LanguageModelConfigur
     };
   }
 
-  // qwen
-  return {
-    type: "object",
-    properties: {
-      reasoningEffort: {
-        type: "string",
-        title: "Thinking Effort",
-        enum: ["off", "auto", "on"],
-        enumItemLabels: ["Off", "Auto", "On"],
-        enumDescriptions: [
-          "Fastest responses",
-          "Model decides",
-          "Enable thinking"
-        ],
-        default: "off",
-        group: "navigation"
-      },
-      thinkingBudget: {
-        type: "string",
-        title: "Thinking Budget",
-        enum: ["auto", "4096", "16384", "32768", "81920"],
-        enumItemLabels: ["Auto", "4K", "16K", "32K", "80K"],
-        enumDescriptions: [
-          "Provider default",
-          "Small budget",
-          "Medium budget",
-          "Large budget",
-          "Maximum budget"
-        ],
-        default: "auto"
+  if (family === "minimax") {
+    // OpenCode transform.ts only defines none/thinking for minimax-m3, and
+    // the gateway does not expose reasoning_effort levels. On/off only.
+    return {
+      properties: {
+        reasoningEffort: {
+          type: "string",
+          title: "Thinking Effort",
+          enum: ["off", "on"],
+          enumItemLabels: ["Off", "On"],
+          enumDescriptions: [
+            "Fastest responses",
+            "Enable thinking"
+          ],
+          default: "off",
+          group: "navigation"
+        }
       }
-    }
-  };
+    };
+  }
+
+  if (family === "qwen") {
+    return {
+      properties: {
+        reasoningEffort: {
+          type: "string",
+          title: "Thinking Effort",
+          enum: ["off", "auto", "on"],
+          enumItemLabels: ["Off", "Auto", "On"],
+          enumDescriptions: [
+            "Fastest responses",
+            "Model decides",
+            "Enable thinking"
+          ],
+          default: "off",
+          group: "navigation"
+        },
+        thinkingBudget: {
+          type: "string",
+          title: "Thinking Budget",
+          enum: ["auto", "4096", "16384", "32768", "81920"],
+          enumItemLabels: ["Auto", "4K", "16K", "32K", "80K"],
+          enumDescriptions: [
+            "Provider default",
+            "Small budget",
+            "Medium budget",
+            "Large budget",
+            "Maximum budget"
+          ],
+          default: "auto"
+        }
+      }
+    };
+  }
+
+  // --- Priority 3: dynamic fallback for any reasoning-capable model ---
+  if (metadata?.reasoning) {
+    return {
+      properties: {
+        reasoningEffort: {
+          type: "string",
+          title: "Thinking Effort",
+          enum: ["off", "on"],
+          enumItemLabels: ["Off", "On"],
+          enumDescriptions: [
+            "Fastest responses",
+            "Enable reasoning"
+          ],
+          default: "off",
+          group: "navigation"
+        }
+      }
+    };
+  }
+
+  return undefined;
 }
 
 // Merge per-request modelConfiguration (from the Copilot Chat submenu) onto
@@ -2460,8 +2657,8 @@ function applyRequestThinkingOverride(
   const thinkingBudget = override.thinkingBudget;
 
   if (family === "deepseek" && typeof reasoningEffort === "string") {
-    if (reasoningEffort === "off" || reasoningEffort === "high" || reasoningEffort === "max") {
-      next.deepseek = reasoningEffort;
+    if (["off", "low", "medium", "high", "max"].includes(reasoningEffort)) {
+      next.deepseek = reasoningEffort as ThinkingSettings["deepseek"];
     }
   }
   if (family === "glm" && typeof thinkingMode === "string") {
@@ -2475,6 +2672,16 @@ function applyRequestThinkingOverride(
   }
   if (family === "kimi" && typeof reasoningEffort === "string") {
     if (reasoningEffort === "on" || reasoningEffort === "off") next.kimi = reasoningEffort;
+  }
+  if (family === "mimo") {
+    if (typeof reasoningEffort === "string" && ["off", "low", "medium", "high"].includes(reasoningEffort)) {
+      next.mimo = reasoningEffort as ThinkingSettings["mimo"];
+    }
+  }
+  if (family === "minimax") {
+    if (typeof reasoningEffort === "string" && ["off", "on"].includes(reasoningEffort)) {
+      next.minimax = reasoningEffort as ThinkingSettings["minimax"];
+    }
   }
   if (family === "qwen") {
     if (typeof thinkingMode === "string" && (thinkingMode === "auto" || thinkingMode === "on" || thinkingMode === "off")) {
@@ -2536,9 +2743,12 @@ function getSettings(): ApiSettings {
       deepseek: config.get<ThinkingSettings["deepseek"]>("thinking.deepseek", "off"),
       glm: config.get<ThinkingSettings["glm"]>("thinking.glm", "off"),
       kimi: config.get<ThinkingSettings["kimi"]>("thinking.kimi", "off"),
+      minimax: config.get<ThinkingSettings["minimax"]>("thinking.minimax", "off"),
       qwen: config.get<ThinkingSettings["qwen"]>("thinking.qwen", "off"),
-      qwenBudget: config.get<ThinkingSettings["qwenBudget"]>("thinking.qwenBudget", "auto")
-    }
+      qwenBudget: config.get<ThinkingSettings["qwenBudget"]>("thinking.qwenBudget", "auto"),
+      mimo: config.get<ThinkingSettings["mimo"]>("thinking.mimo", "off"),
+    },
+    stripThinkTags: config.get<ApiSettings["stripThinkTags"]>("stripThinkTags", "auto",
   };
 }
 
@@ -2558,7 +2768,10 @@ function buildThinkingPayload(modelId: string, thinking: ThinkingSettings, hasIm
   }
 
   if (/^kimi-/i.test(modelId)) {
-    return { thinking: { type: thinking.kimi === "on" ? "enabled" : "disabled" } };
+    // MoonshotAI/Kimi API uses enable_thinking (boolean) on the OpenAI-compatible
+    // chat-completions endpoint. This is more universally supported than the
+    // Anthropic-style thinking: { type: "enabled"|"disabled" } object.
+    return { enable_thinking: thinking.kimi === "on" };
   }
 
   if (/^qwen3(?:\.|-)/i.test(modelId)) {
@@ -2580,6 +2793,28 @@ function buildThinkingPayload(modelId: string, thinking: ThinkingSettings, hasIm
         : { enable_thinking: true, thinking_budget: Number(thinking.qwenBudget) };
     }
     return { enable_thinking: false };
+  }
+
+  if (/^mimo-/i.test(modelId)) {
+    // Mimo models use OpenAI-compatible chat-completions with reasoning_content.
+    // Supported efforts: low, medium, high (per OpenCode upstream defaults).
+    if (thinking.mimo === "off") {
+      return {};
+    }
+    return { reasoning_effort: thinking.mimo };
+  }
+
+  if (/^minimax-/i.test(modelId)) {
+    // OpenCode transform.ts maps minimax-m3 to thinking: { type: "disabled"|"adaptive" }
+    // (Anthropic-style format, not reasoning_effort). MiniMax models routed through
+    // the messages endpoint (m2.*) use standard Anthropic enabled/disabled.
+    if (thinking.minimax === "off") {
+      return {};
+    }
+    if (/^minimax-m2\./i.test(modelId)) {
+      return { thinking: { type: "enabled" } };
+    }
+    return { thinking: { type: "adaptive" } };
   }
 
   return {};
@@ -2609,8 +2844,13 @@ function buildQwenAnthropicThinkingPayload(thinking: ThinkingSettings): Record<s
 function modelLimits(
   metadata: ResolvedModelMetadata,
   settings = getSettings(),
+  contextSizeOverride?: number,
 ): ModelLimits {
-  const contextWindow = positiveOverride(settings.maxInputTokensOverride) ?? metadata.contextWindow;
+  const baseContextWindow = positiveOverride(settings.maxInputTokensOverride) ?? metadata.contextWindow;
+  // If the user selected a specific context size tier, cap the window to that
+  const contextWindow = contextSizeOverride !== undefined
+    ? Math.min(baseContextWindow, contextSizeOverride)
+    : baseContextWindow;
   const maxOutputTokens = positiveOverride(settings.maxOutputTokensOverride) ?? metadata.maxOutputTokens;
   const apiMaxOutputTokens = Math.min(maxOutputTokens, contextWindow);
   // advertisedContextWindow = actual model context window (not inflated).

@@ -49,12 +49,21 @@ This lets you pick and use OpenCode models directly from the Copilot Chat model 
 
 ### Thinking & Reasoning Controls
 
-- **Per-model Thinking configuration** — dedicated settings for each model family:
-  - **DeepSeek**: `off` / `high` / `max`
+- **Per-model Thinking configuration** — dedicated settings for each model family, now dynamically enhanced with per-model `reasoning_options` from `models.dev`:
+  - **DeepSeek**: `off` / `low` / `medium` / `high` / `max`
   - **GLM**: `on` / `off`
   - **Kimi**: `on` / `off`
+  - **MiniMax**: `off` / `on`
+  - **Mimo (Xiaomi)**: `off` / `low` / `medium` / `high`
   - **Qwen**: `auto` / `on` / `off` + optional `thinking_budget` (`4096`–`81920`)
+  - **Dynamic from models.dev** — when `models.dev` provides explicit `reasoning_options` for a model (e.g. `[{type:"effort",values:["low","medium","high","max"]}]`), the picker renders the exact options the model supports, overriding any hardcoded defaults.
+- **Dynamic fallback** — any model with `reasoning: true` in its metadata automatically gets a generic `off`/`on` Thinking Effort control, so future reasoning-capable models work without hardcoded mappings.
 - **`opencodego.debugReasoning`** — writes provider `reasoning_content` to the **Output → OpenCode** channel for debugging thinking-mode responses.
+
+### Context Size & Tiered Pricing
+
+- **Context Size selector** — models with tiered pricing (from `models.dev` `cost.tiers[]` and `cost.context_over_200k`) expose a **Context Size** dropdown in the model picker, letting you choose between e.g. `256K` (default pricing) and `1M` (higher pricing). The selected value caps the effective context window for each request.
+- **Pricing transparency** — per-model `inputCost`, `outputCost`, `cacheCost`, and `priceCategory` from the live `models.dev` registry are exposed to the VS Code model picker, so you always see the real pricing for your selected tier.
 
 ### Usage Tracking
 
@@ -117,7 +126,7 @@ For advanced usage, you can also run these commands via the Command Palette (`Cm
 | `OpenCode Go: Diagnostics` | Show a markdown report of registered OpenCode Go models and recent Go request summaries |
 | `OpenCode Zen: Diagnostics` | Show a markdown report of registered OpenCode Zen models and recent Zen request summaries |
 | `OpenCode: Model Picker Diagnostics` | Show all registered models across OpenCode Go, Zen, and Copilot vendors with full metadata |
-| `OpenCode: Set Thinking Effort…` | Configure per-family Thinking mode (DeepSeek, GLM, Kimi, Qwen) and Qwen thinking budget |
+| `OpenCode: Set Thinking Effort…` | Configure per-family Thinking mode (DeepSeek, GLM, Kimi, Mimo, Qwen) and Qwen thinking budget |
 
 > **Note:** The native BYOK flow via **Language Models** (gear icon ⚙) is recommended. VS Code will ask for a group name, then the matching API key. Go and Zen are separate provider groups, so both can be active at the same time.
 
@@ -135,9 +144,10 @@ For advanced usage, you can also run these commands via the Command Palette (`Cm
 | `opencodego.streamIdleTimeoutSeconds` | `number` | `120` | Cancels a request if the response stream stops sending chunks for too long |
 | `opencodego.showUsageStatusBar` | `boolean` | `true` | Show the latest OpenCode usage summary in the VS Code status bar |
 | `opencodego.freeOnly` | `boolean` | `true` | Limit OpenCode Zen to free models only. Disable to include paid Zen models in the picker |
-| `opencodego.thinking.deepseek` | `string` | `"off"` | Thinking mode for DeepSeek models (`off`, `high`, `max`) |
+| `opencodego.thinking.deepseek` | `string` | `"off"` | Thinking mode for DeepSeek models (`off`, `low`, `medium`, `high`, `max`) |
 | `opencodego.thinking.glm` | `string` | `"off"` | Thinking mode for GLM models (`on`, `off`) |
 | `opencodego.thinking.kimi` | `string` | `"off"` | Thinking mode for Kimi models (`on`, `off`) |
+| `opencodego.thinking.mimo` | `string` | `"off"` | Thinking mode for Mimo (Xiaomi) models (`off`, `low`, `medium`, `high`) |
 | `opencodego.thinking.qwen` | `string` | `"off"` | Thinking mode for Qwen models (`auto`, `on`, `off`) |
 | `opencodego.thinking.qwenBudget` | `string` | `"auto"` | Optional `thinking_budget` for Qwen models (`auto`, `4096`, `16384`, `32768`, `81920`). Ignored when Qwen thinking is `off` |
 
