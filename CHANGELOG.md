@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to the **OpenCode Go BYOK Provider** extension are documented here.
+## [0.2.3] — 2026-06-09
+
+### Added
+
+- Refreshed extension icon (`opencodego.png` and `opencodego.svg`) with a redesigned visual featuring gradient backgrounds, subtle grid pattern, glow effects, and sparkle accents for a more polished marketplace presence.
+
+### Changed
+
+- Cleaned up the "OpenCode" output channel by removing all verbose debug and informational logs. The output channel was previously flooded with per-model registration logs, per-request summaries, streaming stats, metadata refresh messages, and usage tracking lines. Now the output channel only surfaces error-level messages (e.g. `ERROR model=...`) and critical warnings (empty response, rate limits, HTTP errors), keeping it clean for production use. All removed diagnostic data was already accessible through the extension's diagnostics document and status bar indicators.
+
+### Fixed
+
+- Fixed `Buffer` not found TypeScript error by replacing `Buffer.from(part.data).toString("utf8")` with `new TextDecoder().decode(part.data)` in `estimateDataPartTokenCount`. `TextDecoder` is a Web API available in all JS environments without requiring `@types/node`.
+
+## [0.2.2] — 2026-06-08
+
+### Fixed
+- Strip `<think>...</think>` tags from model output when enabled. For streaming responses, the inner thinking content is accumulated into the reasoning pipeline and displayed via the existing reasoning fallback. For non-streaming fallback, the tags are removed and only the surrounding text is kept. Gated by the new `opencodego.stripThinkTags` setting (`"auto"` / `"always"` / `"never"`). In `"auto"` mode (default), stripping applies only to known models that inline reasoning in `<think>` tags within the content field (MiniMax M3 family).
 
 ## [0.2.1] — 2026-06-06
 

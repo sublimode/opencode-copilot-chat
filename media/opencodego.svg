@@ -1,23 +1,69 @@
 <svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background rounded rect - solid dark navy -->
-  <rect width="128" height="128" rx="22" fill="#0F172A"/>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="64" y1="20" x2="64" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#818CF8"/>
+      <stop offset="0.5" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4F46E5"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="34" y1="64" x2="94" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.5" stop-color="#818CF8"/>
+      <stop offset="1" stop-color="#C084FC"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="roundClip">
+      <rect width="128" height="128" rx="24"/>
+    </clipPath>
+  </defs>
 
-  <!-- Subtle inner glow ring -->
-  <rect x="2" y="2" width="124" height="124" rx="21" stroke="#1E40AF" stroke-width="2" fill="none" opacity="0.6"/>
+  <!-- Background -->
+  <rect width="128" height="128" rx="24" fill="url(#bgGrad)"/>
 
-  <!-- Hexagon shape (outer accent) -->
-  <path d="M64 20 L99 40 L99 80 L64 100 L29 80 L29 40 Z"
-        stroke="#38BDF8" stroke-width="3.5" stroke-linejoin="round" fill="none" opacity="0.5"/>
+  <!-- Subtle grid pattern -->
+  <g opacity="0.04" clip-path="url(#roundClip)">
+    <line x1="32" y1="0" x2="32" y2="128" stroke="white" stroke-width="0.5"/>
+    <line x1="64" y1="0" x2="64" y2="128" stroke="white" stroke-width="0.5"/>
+    <line x1="96" y1="0" x2="96" y2="128" stroke="white" stroke-width="0.5"/>
+    <line x1="0" y1="32" x2="128" y2="32" stroke="white" stroke-width="0.5"/>
+    <line x1="0" y1="64" x2="128" y2="64" stroke="white" stroke-width="0.5"/>
+    <line x1="0" y1="96" x2="128" y2="96" stroke="white" stroke-width="0.5"/>
+  </g>
 
-  <!-- Left bracket < -->
-  <path d="M50 48 L34 64 L50 80"
-        stroke="#38BDF8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Outer glow ring -->
+  <rect x="6" y="6" width="116" height="116" rx="19" stroke="url(#glowGrad)" stroke-width="1" fill="none" opacity="0.3"/>
 
-  <!-- Right bracket > -->
-  <path d="M78 48 L94 64 L78 80"
-        stroke="#818CF8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- OpenCode Mark — outer frame (O shape) with gradient glow -->
+  <g filter="url(#glow)">
+    <path d="M80 88H48V40H80V88ZM92 100H36V28H92V100Z" fill="url(#glowGrad)"/>
+  </g>
 
-  <!-- Slash / -->
-  <line x1="71" y1="44" x2="57" y2="84"
-        stroke="#E2E8F0" stroke-width="5.5" stroke-linecap="round"/>
+  <!-- Inner accent — smaller rect with cyan tint -->
+  <rect x="54" y="49" width="20" height="30" rx="2" fill="#38BDF8" opacity="0.35"/>
+
+  <!-- Sparkle top-right -->
+  <g opacity="0.9">
+    <circle cx="92" cy="28" r="2" fill="#38BDF8"/>
+    <line x1="92" y1="22" x2="92" y2="34" stroke="#38BDF8" stroke-width="1" opacity="0.5"/>
+    <line x1="86" y1="28" x2="98" y2="28" stroke="#38BDF8" stroke-width="1" opacity="0.5"/>
+  </g>
+
+  <!-- Sparkle bottom-left -->
+  <g opacity="0.6">
+    <circle cx="36" cy="100" r="1.5" fill="#C084FC"/>
+    <line x1="36" y1="96" x2="36" y2="104" stroke="#C084FC" stroke-width="0.8" opacity="0.4"/>
+    <line x1="32" y1="100" x2="40" y2="100" stroke="#C084FC" stroke-width="0.8" opacity="0.4"/>
+  </g>
+
+  <!-- Bottom reflection line -->
+  <rect x="44" y="108" width="40" height="2" rx="1" fill="url(#accentGrad)" opacity="0.15"/>
 </svg>
