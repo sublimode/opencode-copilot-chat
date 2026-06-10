@@ -34,6 +34,7 @@ import {
 } from "./streaming";
 import { GO_VENDOR, ZEN_VENDOR } from "./providerTypes";
 import { isInternalDataPart } from "./chatParts";
+import { trimApiMessages, MESSAGE_BYTE_BUDGET, MAX_PAYLOAD_BYTES } from "./messageTrimmer";
 import {
   formatCacheHitRatio,
   formatUsageStatusBarText,
@@ -83,7 +84,7 @@ const KNOWN_UNAVAILABLE_MODEL_IDS = new Set([
 const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const OPEN_CODE_CLIENT = "vscode-copilot-chat";
-const OPEN_CODE_USER_AGENT = "opencode-copilot-chat/0.2.3 VSCode";
+const OPEN_CODE_USER_AGENT = "opencode-copilot-chat/0.1.7 VSCode";
 
 const PROVIDERS: Record<ProviderDefinition["vendor"], ProviderDefinition> = {
   [GO_VENDOR]: {
@@ -260,7 +261,6 @@ interface ApiSettings {
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
   thinking: ThinkingSettings;
-  stripThinkTags: "never" | "auto" | "always";
 }
 
 interface LanguageModelConfiguration {
@@ -394,7 +394,11 @@ interface RecentTransportSummary extends TransportRequestSummary {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  goUsageTracker = new GoUsageTracker(context);
+  const goUsageLogChannel = vscode.window.createOutputChannel("OpenCode Go Usage");
+  context.subscriptions.push(goUsageLogChannel);
+  goUsageTracker = new GoUsageTracker(context, (msg) => {
+    goUsageLogChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+  });
   ensureUsageStatusBar(context);
   ensureGoUsageStatusBar(context);
   const goProvider = new OpenCodeProvider(context, PROVIDERS[GO_VENDOR]);
@@ -913,6 +917,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     }
 
     const statusBar = vscode.window.setStatusBarMessage(`$(loading~spin) Testing ${this.definition.displayName} connection...`);
+    this.log(`Testing connection to ${this.definition.chatCompletionsUrl}`);
 
     try {
       const response = await fetch(this.definition.chatCompletionsUrl, {
@@ -931,6 +936,8 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
 
       const responseText = await response.text();
       statusBar.dispose();
+      this.log(`Test response (${response.status}): ${responseText}`);
+      this.getOutputChannel().show(true);
 
       if (response.ok) {
         vscode.window.showInformationMessage(`${this.definition.displayName}: Connection OK (HTTP ${response.status}). Check Output panel for details.`);
@@ -940,6 +947,8 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     } catch (error) {
       statusBar.dispose();
       const message = error instanceof Error ? error.message : String(error);
+      this.log(`Test connection error: ${message}`);
+      this.getOutputChannel().show(true);
       vscode.window.showErrorMessage(`${this.definition.displayName}: Connection error - ${message}`);
     }
   }
@@ -1023,7 +1032,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     const settings = getSettings();
     const metadataSnapshot = await this.getMetadataSnapshot();
 
-    const result = models.map((modelId) => {
+    return models.map((modelId) => {
       const metadata = this.resolveModelMetadata(modelId, metadataSnapshot);
       const routing = resolveModelRouting(modelId, this.definition);
       const effectiveModelId = toEffectiveModelId(modelId, this.definition.vendor);
@@ -1072,10 +1081,10 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         ...(configurationSchema ? { configurationSchema } : {})
       };
 
+      this.log(`Model registered: id=${info.id} family=${info.family} metadataSource=${metadata.source} endpointKind=${routing.endpointKind} endpointUrl=${routing.endpointUrl} configurationSchema=${configurationSchema ? JSON.stringify(configurationSchema) : "none"}`);
+
       return info;
     });
-
-    return result;
   }
 
   async provideLanguageModelChatResponse(
@@ -1107,8 +1116,34 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     const metadataSnapshot = await this.getMetadataSnapshot();
     const metadata = this.resolveModelMetadata(rawModelId, metadataSnapshot);
     const routing = resolveModelRouting(rawModelId, this.definition);
+
+    // ------------------------------------------------------------------
+    // Byte-aware message trimming — the OpenCode Go proxy returns HTTP
+    // 500 when the JSON body exceeds ~400 KB.  Long conversations can
+    // push past that limit even though the model's token context window
+    // is far from full.  We trim the oldest complete conversation turns
+    // to keep the payload within the proxy's limit while preserving the
+    // system prompt, recent turns, and tool-call atomicity.
+    // ------------------------------------------------------------------
+    const messageBudget = MESSAGE_BYTE_BUDGET[routing.endpointKind];
+    const trimmedMessages = trimApiMessages(apiMessages, messageBudget);
+    const trimmedCount = apiMessages.length - trimmedMessages.length;
+    if (trimmedCount > 0) {
+      const keptTurns = trimmedMessages.filter(m => m.role === "user").length;
+      const logMsg = `[trim] dropped ${trimmedCount} older messages (${apiMessages.length} → ${trimmedMessages.length}, ~${keptTurns} user turns kept) to stay under ${MAX_PAYLOAD_BYTES / 1024} KB proxy limit`;
+      this.getOutputChannel().appendLine(logMsg);
+
+      // Show a one-time subtle notification so the user knows context
+      // was trimmed — but only if a significant portion was dropped.
+      if (trimmedCount > apiMessages.length * 0.3) {
+        vscode.window.showInformationMessage(
+          `OpenCode Go: Trimmed ${trimmedCount} older messages to keep the conversation within size limits. Recent context is fully preserved.`
+        );
+      }
+    }
+
     const limits = modelLimits(metadata, settings);
-    const hasImageInput = messagesHaveImages(apiMessages);
+    const hasImageInput = messagesHaveImages(trimmedMessages);
     const thinkingPayload = buildThinkingPayload(rawModelId, settings.thinking, hasImageInput);
     const requestHeaders = buildOpenCodeRequestHeaders(
       messages,
@@ -1125,10 +1160,17 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       );
       updateUsageStatusBar(this.definition.displayName, rawModelId, summary);
       if (this.definition.vendor === GO_VENDOR && goUsageTracker) {
+        this.log(`[go-usage] Recording: provider=${summary.providerDisplayName} model=${summary.modelId} promptTokens=${summary.promptTokens ?? "n/a"} completionTokens=${summary.completionTokens ?? "n/a"} cachedTokens=${summary.cachedTokens ?? "n/a"} status=${summary.status ?? "n/a"} error=${summary.errorMessage ?? "none"}`);
         goUsageTracker.record(summary, metadata.cost);
         refreshGoUsageStatusBar();
+        this.log(`[go-usage] After record: entries=${goUsageTracker.getSummary().today.requests}`);
       }
     };
+
+    this.log(`Request: initiator=${options.requestInitiator} model=${model.id} rawModel=${rawModelId} endpoint=${routing.endpointKind} metadataSource=${metadata.source} messages=${apiMessages.length} session=${requestHeaders["x-opencode-session"]} request=${requestHeaders["x-opencode-request"]} modelConfiguration=${JSON.stringify(pickThinkingModelConfiguration(requestOverride))} thinking=${JSON.stringify(settings.thinking)} thinkingPayload=${JSON.stringify(thinkingPayload)}`);
+    if (settings.debugReasoning) {
+      this.log("Reasoning debug is enabled. Provider reasoning_content will be written to this output channel when available.");
+    }
 
     try {
       const contextWindowOutputBuffer = limits.advertisedMaxOutputTokens;
@@ -1139,7 +1181,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildAnthropicMessagesRequestBody(rawModelId, apiMessages, options, settings, limits),
+          body: buildAnthropicMessagesRequestBody(rawModelId, trimmedMessages, options, settings, limits),
           requestHeaders,
           progress,
           token,
@@ -1151,7 +1193,6 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           authHeaders: buildOpenCodeGatewayAuthHeaders("messages", apiKey),
           capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
           onTransportSummary,
-          stripThinkTags: settings.stripThinkTags,
         });
         return;
       }
@@ -1162,7 +1203,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildResponsesRequestBody(rawModelId, apiMessages, options, settings, limits),
+          body: buildResponsesRequestBody(rawModelId, trimmedMessages, options, settings, limits),
           authHeaders: buildOpenCodeGatewayAuthHeaders("responses", apiKey),
           requestHeaders,
           progress,
@@ -1178,9 +1219,9 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           for (const toolCallId of toolCallIds) {
             this.reasoningContentByToolCallId.set(toolCallId, reasoningContent);
           }
-          },
-          stripThinkTags: settings.stripThinkTags,
+          }
         });
+        this.log(`Request completed: model=${model.id}`);
         return;
       }
 
@@ -1190,7 +1231,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildGoogleGenerateContentBody(apiMessages, options, settings, limits),
+          body: buildGoogleGenerateContentBody(trimmedMessages, options, settings, limits),
           requestHeaders,
           progress,
           token,
@@ -1206,8 +1247,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           for (const toolCallId of toolCallIds) {
             this.reasoningContentByToolCallId.set(toolCallId, reasoningContent);
           }
-          },
-          stripThinkTags: settings.stripThinkTags,
+          }
         });
         return;
       }
@@ -1217,7 +1257,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         providerDisplayName: this.definition.displayName,
         apiKey,
         modelId: rawModelId,
-        body: buildChatCompletionsRequestBody(rawModelId, apiMessages, options, settings, limits),
+        body: buildChatCompletionsRequestBody(rawModelId, trimmedMessages, options, settings, limits),
         authHeaders: buildOpenCodeGatewayAuthHeaders("chat-completions", apiKey),
         requestHeaders,
         progress,
@@ -1233,9 +1273,9 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           for (const toolCallId of toolCallIds) {
             this.reasoningContentByToolCallId.set(toolCallId, reasoningContent);
           }
-        },
-        stripThinkTags: settings.stripThinkTags,
+        }
       });
+      this.log(`Request completed: model=${model.id}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`ERROR model=${model.id}: ${message}`);
@@ -1291,9 +1331,14 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
       );
 
       const removedModelIds = uniqueModelIds.filter((modelId) => !filteredModelIds.includes(modelId));
+      if (removedModelIds.length) {
+        this.log(`Filtered unavailable/deprecated models: ${removedModelIds.join(", ")}`);
+      }
 
       return filteredModelIds;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Could not fetch model status metadata from models.dev. Applying local unavailable model filter only. ${message}`);
       return uniqueModelIds.filter((modelId) => !KNOWN_UNAVAILABLE_MODEL_IDS.has(modelId));
     }
   }
@@ -1355,6 +1400,9 @@ async function refreshOpenCodeModelMetadata(
     const snapshot = normalizeModelsDevSnapshot(data);
     modelMetadataSnapshot = snapshot;
     await context.globalState.update(MODEL_METADATA_CACHE_KEY, snapshot);
+    output?.appendLine(
+      `[metadata] refreshed models.dev cache go=${Object.keys(snapshot.providers[GO_VENDOR]).length} zen=${Object.keys(snapshot.providers[ZEN_VENDOR]).length}`,
+    );
     return snapshot;
   })()
     .catch((error) => {
@@ -1364,11 +1412,19 @@ async function refreshOpenCodeModelMetadata(
           MODEL_METADATA_CACHE_KEY,
         );
       if (cached) {
+        const message = error instanceof Error ? error.message : String(error);
+        output?.appendLine(
+          `[metadata] refresh failed, using cached snapshot: ${message}`,
+        );
         modelMetadataSnapshot = cached;
         return cached;
       }
 
+      const message = error instanceof Error ? error.message : String(error);
       const fallback = bundledModelMetadataSnapshot();
+      output?.appendLine(
+        `[metadata] refresh failed, using bundled snapshot: ${message}`,
+      );
       modelMetadataSnapshot = fallback;
       return fallback;
     })
@@ -2200,7 +2256,7 @@ function estimateDataPartTokenCount(part: vscode.LanguageModelDataPart): number 
   }
 
   if (part.mimeType.startsWith("text/") || part.mimeType === "application/json") {
-    return estimateTokenCount(new TextDecoder().decode(part.data));
+    return estimateTokenCount(Buffer.from(part.data).toString("utf8"));
   }
 
   return Math.max(1, Math.ceil(part.data.byteLength / 4));
@@ -2482,8 +2538,7 @@ function getSettings(): ApiSettings {
       kimi: config.get<ThinkingSettings["kimi"]>("thinking.kimi", "off"),
       qwen: config.get<ThinkingSettings["qwen"]>("thinking.qwen", "off"),
       qwenBudget: config.get<ThinkingSettings["qwenBudget"]>("thinking.qwenBudget", "auto")
-    },
-    stripThinkTags: config.get<ApiSettings["stripThinkTags"]>("stripThinkTags", "auto"),
+    }
   };
 }
 
