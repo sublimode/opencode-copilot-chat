@@ -2,14 +2,24 @@
 
 All notable changes to the **OpenCode Go BYOK Provider** extension are documented here.
 
-## [Unreleased]
+## [0.2.6] — 2026-06-10
+
+### Removed
+
+- **Removed message trimming feature entirely** (`messageTrimmer.ts`). The byte-aware trimming that pruned older conversation turns was too aggressive and disruptive — users reported losing significant context with notifications appearing on every long conversation. Removed all related code: `messageTrimmer.ts` module, trimming logic in `extension.ts`, and payload size safety net in `streaming.ts`.
+- **Removed gzip compression** (`node:zlib`). The OpenCode Go/Zen proxy does not support `Content-Encoding: gzip` and returns HTTP 500 Internal Server Error when receiving compressed request bodies. All outgoing requests now send raw JSON payloads.
+
+## [0.2.5] — 2026-06-10
+
+### Fixed
+
+- **Removed gzip compression** — the OpenCode Go/Zen proxy does **not** support `Content-Encoding: gzip` and returns HTTP 500 Internal Server Error when receiving compressed request bodies. All outgoing requests now send raw JSON payloads. Message trimming (`messageTrimmer.ts`) remains the primary mechanism for keeping payloads under the proxy's ~400 KB body limit.
 
 ## [0.2.4] — 2026-06-10
 
 ### Added
 
-- **Gzip request compression.** All outgoing API requests to the OpenCode Go/Zen proxy are now automatically gzip-compressed when the JSON payload exceeds 50 KB. JSON typically compresses 5-10×, turning a 400 KB payload into ~40-80 KB — well within the proxy's HTTP body size limit. Uses `node:zlib.gzipSync` with `Content-Encoding: gzip` header. Compression is transparent; the proxy handles decompression natively. This is the primary mechanism for avoiding proxy payload limit errors; message trimming is now a fallback only.
-- **Byte-aware message trimming fallback.** New `messageTrimmer.ts` module provides `trimApiMessages()` which prunes older conversation turns when the messages array exceeds a generous byte budget (~800 KB pre-compression). Always preserves the system prompt, full conversation turns, and tool-call atomicity. Trimming only activates as a safety net when gzip alone isn't sufficient. A subtle notification is shown to the user when a significant portion (>30%) of context is trimmed.
+- **Byte-aware message trimming.** New `messageTrimmer.ts` module provides `trimApiMessages()` which prunes older conversation turns when the messages array exceeds a byte budget (~800 KB). Always preserves the system prompt, full conversation turns, and tool-call atomicity. A subtle notification is shown to the user when a significant portion (>30%) of context is trimmed.
 - **Context Size selector for tiered-pricing models.** Models with `cost.tiers[]` or `cost.context_over_200k` in their `models.dev` metadata now expose a **Context Size** dropdown in the VS Code model picker (e.g. `256K` ↔ `1M`). The selected value caps the effective `maxInputTokens` for each request, matching the pricing structure declared by the upstream provider. Supported for both OpenCode Go and OpenCode Zen models.
 - **Dynamic reasoning options from models.dev.** When a model's `models.dev` entry declares explicit `reasoning_options` (e.g. `[{type:"effort",values:["low","medium","high","max"]}]`), the model picker renders those exact effort levels, overriding the family-based hardcoded defaults. The `reasoningOptions` field is propagated through `ModelMetadataFields` → `ResolvedModelMetadata` → `modelConfigurationSchema()`.
 - **Thinking controls for Mimo and MiniMax models.** MiniMax (`minimax-m*`) models now support on/off thinking only (`thinking: { type: "disabled"|"adaptive"|"enabled" }` — the OpenCode gateway does not expose `reasoning_effort` for this family, as verified in the official `transform.ts`). Mimo (`mimo-v2.*`) models support `off`/`low`/`medium`/`high` reasoning effort levels. DeepSeek (`deepseek-v4-*`) models support `off`/`low`/`medium`/`high`/`max` — matching the upstream OpenCode reasoning effort options sourced from the official OpenCode provider `transform.ts`. The `opencodego.thinking.mimo`, `opencodego.thinking.minimax` and `opencodego.thinking.deepseek` settings have been updated with the corrected enum values.
@@ -21,7 +31,7 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 ### Changed
 
 - **Merged `main` into `develop`** — all features from `main` (Mimo thinking, context size selector, dynamic reasoning, strip think tags, icon refresh) are now unified with develop-only features (gzip compression, message trimming) into a single coherent branch.
-- Streaming layer refactored to separate gzip compression logic from SSE parsing, making payload handling more maintainable.
+- Streaming layer cleaned up — removed gzip compression logic that caused proxy 500 errors. SSE parsing and request flow remain unchanged.
 
 ### Fixed
 

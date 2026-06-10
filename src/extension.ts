@@ -36,7 +36,7 @@ import {
 } from "./streaming";
 import { GO_VENDOR, ZEN_VENDOR } from "./providerTypes";
 import { isInternalDataPart } from "./chatParts";
-import { trimApiMessages, MESSAGE_BYTE_BUDGET, MAX_PAYLOAD_BYTES } from "./messageTrimmer";
+
 import {
   formatCacheHitRatio,
   formatUsageStatusBarText,
@@ -1139,33 +1139,8 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
     const metadata = this.resolveModelMetadata(rawModelId, metadataSnapshot);
     const routing = resolveModelRouting(rawModelId, this.definition);
 
-    // ------------------------------------------------------------------
-    // Byte-aware message trimming — the OpenCode Go proxy returns HTTP
-    // 500 when the JSON body exceeds ~400 KB.  Long conversations can
-    // push past that limit even though the model's token context window
-    // is far from full.  We trim the oldest complete conversation turns
-    // to keep the payload within the proxy's limit while preserving the
-    // system prompt, recent turns, and tool-call atomicity.
-    // ------------------------------------------------------------------
-    const messageBudget = MESSAGE_BYTE_BUDGET[routing.endpointKind];
-    const trimmedMessages = trimApiMessages(apiMessages, messageBudget);
-    const trimmedCount = apiMessages.length - trimmedMessages.length;
-    if (trimmedCount > 0) {
-      const keptTurns = trimmedMessages.filter(m => m.role === "user").length;
-      const logMsg = `[trim] dropped ${trimmedCount} older messages (${apiMessages.length} → ${trimmedMessages.length}, ~${keptTurns} user turns kept) to stay under ${MAX_PAYLOAD_BYTES / 1024} KB proxy limit`;
-      this.getOutputChannel().appendLine(logMsg);
-
-      // Show a one-time subtle notification so the user knows context
-      // was trimmed — but only if a significant portion was dropped.
-      if (trimmedCount > apiMessages.length * 0.3) {
-        vscode.window.showInformationMessage(
-          `OpenCode Go: Trimmed ${trimmedCount} older messages to keep the conversation within size limits. Recent context is fully preserved.`
-        );
-      }
-    }
-
     const limits = modelLimits(metadata, settings, contextSizeOverride);
-    const hasImageInput = messagesHaveImages(trimmedMessages);
+    const hasImageInput = messagesHaveImages(apiMessages);
     const thinkingPayload = buildThinkingPayload(rawModelId, settings.thinking, hasImageInput);
     const requestHeaders = buildOpenCodeRequestHeaders(
       messages,
@@ -1203,7 +1178,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildAnthropicMessagesRequestBody(rawModelId, trimmedMessages, options, settings, limits),
+          body: buildAnthropicMessagesRequestBody(rawModelId, apiMessages, options, settings, limits),
           requestHeaders,
           progress,
           token,
@@ -1225,7 +1200,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildResponsesRequestBody(rawModelId, trimmedMessages, options, settings, limits),
+          body: buildResponsesRequestBody(rawModelId, apiMessages, options, settings, limits),
           authHeaders: buildOpenCodeGatewayAuthHeaders("responses", apiKey),
           requestHeaders,
           progress,
@@ -1253,7 +1228,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildGoogleGenerateContentBody(trimmedMessages, options, settings, limits),
+          body: buildGoogleGenerateContentBody(apiMessages, options, settings, limits),
           requestHeaders,
           progress,
           token,
@@ -1279,7 +1254,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         providerDisplayName: this.definition.displayName,
         apiKey,
         modelId: rawModelId,
-        body: buildChatCompletionsRequestBody(rawModelId, trimmedMessages, options, settings, limits),
+        body: buildChatCompletionsRequestBody(rawModelId, apiMessages, options, settings, limits),
         authHeaders: buildOpenCodeGatewayAuthHeaders("chat-completions", apiKey),
         requestHeaders,
         progress,

@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-import { gzipSync } from "node:zlib";
 import {
   buildOpenCodeRequestError,
   formatDuration,
@@ -14,36 +13,6 @@ import {
   normalizeResponsesFullResponse,
   normalizeResponsesStreamEvent,
 } from "./routing";
-
-// ---------------------------------------------------------------------------
-// Payload size guard (hard safety net)
-// ---------------------------------------------------------------------------
-// The primary payload-size management happens in extension.ts via
-// `trimApiMessages()`, which prunes old conversation turns before the body
-// is built.  This guard in streaming.ts is a HARD safety net — it should
-// only trigger in extreme edge cases where the trimmed messages + tool
-// definitions still exceed the OpenCode Go proxy limit (~400 KB).
-// ---------------------------------------------------------------------------
-import { MAX_PAYLOAD_BYTES } from "./messageTrimmer";
-
-function buildPayloadTooLargeError(
-  providerDisplayName: string,
-  modelId: string | undefined,
-  payloadBytes: number,
-): OpenCodeRequestError {
-  const modelHint = modelId ? ` (${modelId})` : "";
-  const kbSize = (payloadBytes / 1024).toFixed(0);
-  const userMessage = [
-    `${providerDisplayName}${modelHint}: Conversation too long even after auto-trimming.`,
-    `The request payload is ${kbSize} KB, which exceeds the OpenCode API proxy limit.`,
-    `Please start a new chat session to reset the conversation history.`,
-  ].join(" ");
-
-  return new OpenCodeRequestError(
-    `${providerDisplayName} payload too large after trimming${modelHint} payloadBytes=${payloadBytes} (max ${MAX_PAYLOAD_BYTES})`,
-    userMessage,
-  );
-}
 import { createUsageDataParts } from "./chatParts";
 import {
   clearContextWindowRequest,
@@ -355,64 +324,26 @@ async function streamOpenCodeResponse(
 
     const rawPayload = JSON.stringify(options.body);
 
-    // Log request before compression for debugging latency.
+    // Log request for debugging latency.
     options.output?.appendLine(
       `[request] url=${options.url} payloadBytes=${rawPayload.length} requestTimeoutMs=${options.requestTimeoutMs} streamIdleTimeoutMs=${options.streamIdleTimeoutMs}`,
     );
 
     // ------------------------------------------------------------------
-    // Gzip compression — the OpenCode Go proxy has an HTTP body size
-    // limit (~400 KB).  JSON compresses 5-10x with gzip, so a 400 KB
-    // payload becomes ~50-80 KB — well under the proxy limit.  This
-    // preserves the full conversation context without dropping messages.
-    //
-    // We compress when the payload exceeds COMPRESSION_THRESHOLD (50 KB)
-    // to avoid wasting CPU on tiny requests.
+    // NOTE: We do NOT gzip-compress the payload.  The OpenCode proxy
+    // does not support Content-Encoding: gzip and returns HTTP 500.
     // ------------------------------------------------------------------
-    const COMPRESSION_THRESHOLD = 50_000;
-    let payload: string | Uint8Array = rawPayload;
+    const payload = rawPayload;
     const fetchHeaders: Record<string, string> = {
       ...(options.authHeaders ?? { Authorization: `Bearer ${options.apiKey}` }),
       "Content-Type": "application/json",
       ...options.requestHeaders,
     };
 
-    if (rawPayload.length > COMPRESSION_THRESHOLD) {
-      try {
-        const compressed = gzipSync(rawPayload);
-        if (compressed.length < rawPayload.length) {
-          payload = compressed;
-          fetchHeaders["Content-Encoding"] = "gzip";
-          options.output?.appendLine(
-            `[gzip] ${rawPayload.length} → ${compressed.length} bytes (${((1 - compressed.length / rawPayload.length) * 100).toFixed(0)}% reduction)`,
-          );
-        }
-      } catch (err) {
-        // Compression failed (shouldn't happen) — fall through to raw payload.
-        options.output?.appendLine(`[gzip] compression failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // Hard safety net — if even the (possibly compressed) payload still
-    // exceeds the proxy limit, something is seriously wrong.  This should
-    // only trigger if the guaranteed minimum turns from messageTrimmer.ts
-    // produce an enormous payload (e.g. massive tool results).
-    // ------------------------------------------------------------------
-    const finalSize = typeof payload === "string" ? payload.length : payload.byteLength;
-    if (finalSize > MAX_PAYLOAD_BYTES) {
-      const sizeError = buildPayloadTooLargeError(
-        options.providerDisplayName,
-        options.modelId,
-        finalSize,
-      );
-      emitSummary(finalSize, 0, { errorMessage: sizeError.message });
-      throw sizeError;
-    }
     const response = await fetch(options.url, {
       method: "POST",
       headers: fetchHeaders,
-      body: payload as BodyInit,
+      body: payload,
       signal: controller.signal,
     });
 
