@@ -7,6 +7,7 @@ All notable changes to the **OpenCode Go BYOK Provider** extension are documente
 ### Fixed
 
 - **Kimi thinking format correction.** The `[0.2.4]` changelog entry incorrectly stated that Kimi models use `enable_thinking: true | false`. Tests confirm the OpenCode Go gateway **rejects** `enable_thinking` (HTTP 400: "Extra inputs are not permitted"). The correct format is `thinking: { type: "enabled" | "disabled" }` — matching GLM's format and what the gateway expects for MoonshotAI models on the OpenAI-compatible endpoint. The extension code has been using `thinking: { type }` all along; this entry corrects the record.
+- **Respect model `temperature` support from models.dev.** The extension now reads the `temperature: boolean` field from `models.dev` metadata and omits the `temperature` parameter from request payloads when the model declares it unsupported (`temperature: false`). This fixes HTTP 400 errors ("temperature is deprecated for this model.") on models like `claude-opus-4-8` and the GPT-5 family, which have deprecated the temperature parameter.
 
 ## [0.2.6] — 2026-06-10
 
