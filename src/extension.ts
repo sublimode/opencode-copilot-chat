@@ -1178,7 +1178,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildAnthropicMessagesRequestBody(rawModelId, apiMessages, options, settings, limits),
+          body: buildAnthropicMessagesRequestBody(rawModelId, apiMessages, options, settings, metadata, limits),
           requestHeaders,
           progress,
           token,
@@ -1200,7 +1200,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           providerDisplayName: this.definition.displayName,
           apiKey,
           modelId: rawModelId,
-          body: buildResponsesRequestBody(rawModelId, apiMessages, options, settings, limits),
+          body: buildResponsesRequestBody(rawModelId, apiMessages, options, settings, metadata, limits),
           authHeaders: buildOpenCodeGatewayAuthHeaders("responses", apiKey),
           requestHeaders,
           progress,
@@ -1254,7 +1254,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         providerDisplayName: this.definition.displayName,
         apiKey,
         modelId: rawModelId,
-        body: buildChatCompletionsRequestBody(rawModelId, apiMessages, options, settings, limits),
+        body: buildChatCompletionsRequestBody(rawModelId, apiMessages, options, settings, metadata, limits),
         authHeaders: buildOpenCodeGatewayAuthHeaders("chat-completions", apiKey),
         requestHeaders,
         progress,
@@ -1437,6 +1437,7 @@ function buildChatCompletionsRequestBody(
   messages: ApiMessage[],
   options: vscode.ProvideLanguageModelChatResponseOptions,
   settings: ApiSettings,
+  metadata: ResolvedModelMetadata,
   limits: ModelLimits,
 ): Record<string, unknown> {
   const tools = mapOpenAiTools(options.tools);
@@ -1445,7 +1446,8 @@ function buildChatCompletionsRequestBody(
   return {
     model: modelId,
     messages,
-    temperature: settings.temperature,
+    // Only send temperature if the model supports it (not deprecated)
+    ...(metadata.temperature !== false ? { temperature: settings.temperature } : {}),
     max_tokens: limits.maxOutputTokens,
     stream: true,
     stream_options: { include_usage: true },
@@ -1459,6 +1461,7 @@ function buildAnthropicMessagesRequestBody(
   messages: ApiMessage[],
   options: vscode.ProvideLanguageModelChatResponseOptions,
   settings: ApiSettings,
+  metadata: ResolvedModelMetadata,
   limits: ModelLimits,
 ): Record<string, unknown> {
   const tools = mapAnthropicTools(options.tools);
@@ -1474,7 +1477,8 @@ function buildAnthropicMessagesRequestBody(
 
   return {
     model: modelId,
-    temperature: settings.temperature,
+    // Only send temperature if the model supports it (not deprecated)
+    ...(metadata.temperature !== false ? { temperature: settings.temperature } : {}),
     max_tokens: limits.maxOutputTokens,
     stream: true,
     messages: anthropicMessages,
@@ -1642,6 +1646,7 @@ function buildResponsesRequestBody(
   messages: ApiMessage[],
   options: vscode.ProvideLanguageModelChatResponseOptions,
   settings: ApiSettings,
+  metadata: ResolvedModelMetadata,
   limits: ModelLimits,
 ): Record<string, unknown> {
   const input = messages.flatMap((message) => responsesInputItemsFromMessage(message));
@@ -1651,7 +1656,8 @@ function buildResponsesRequestBody(
     model: modelId,
     input,
     max_output_tokens: limits.maxOutputTokens,
-    temperature: settings.temperature,
+    // Only send temperature if the model supports it (not deprecated)
+    ...(metadata.temperature !== false ? { temperature: settings.temperature } : {}),
     stream: true,
     ...(tools.length ? { tools, tool_choice: toolChoice(options.toolMode) } : {}),
     text: { verbosity: modelId === "gpt-5-codex" ? "medium" : "low" },
@@ -2748,8 +2754,7 @@ function buildThinkingPayload(modelId: string, thinking: ThinkingSettings, hasIm
   }
 
   if (/^kimi-/i.test(modelId)) {
-    // Testes confirmam que o gateway aceita thinking: { type } para Kimi
-    // (HTTP 200). enable_thinking causa 400 ("Extra inputs not permitted").
+    // Tests confirm the gateway accepts thinking: { type } for Kimi
     return { thinking: { type: thinking.kimi === "on" ? "enabled" : "disabled" } };
   }
 

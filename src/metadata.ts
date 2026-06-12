@@ -46,6 +46,8 @@ export interface ModelMetadataFields {
   reasoning?: boolean;
   /** Raw reasoning_options from models.dev, e.g. [{ type: "toggle" }, { type: "effort", values: ["low","medium","high"] }]. */
   reasoningOptions?: Array<{ type?: string; values?: string[] }>;
+  /** Whether the model supports the temperature parameter. False means temperature is deprecated/unsupported. */
+  temperature?: boolean;
   status?: string;
   cost?: ModelCost;
 }
@@ -63,6 +65,8 @@ export interface ResolvedModelMetadata extends BaseModelLimits {
   reasoning: boolean;
   /** Parsed reasoning_options from models.dev, if available. */
   reasoningOptions?: Array<{ type?: string; values?: string[] }>;
+  /** Whether the model supports the temperature parameter. Undefined means unknown (assume supported). */
+  temperature?: boolean;
   status?: string;
   source: "models.dev" | "live" | "fallback" | "default";
   cost?: ModelCost;
@@ -99,6 +103,7 @@ export interface ModelsDevModelRecord {
   attachment?: boolean;
   reasoning?: boolean;
   reasoning_options?: Array<{ type?: string; values?: string[] }>;
+  temperature?: boolean;
   modalities?: {
     input?: string[];
     output?: string[];
@@ -418,6 +423,9 @@ export function resolveModelMetadata(
     reasoningOptions:
       liveMetadata?.reasoningOptions ??
       cachedMetadata?.reasoningOptions,
+    temperature:
+      liveMetadata?.temperature ??
+      cachedMetadata?.temperature,
   };
 }
 
@@ -482,6 +490,8 @@ function normalizeModelsDevProvider(
         Array.isArray(model.reasoning_options) && model.reasoning_options.length > 0
           ? model.reasoning_options
           : undefined,
+      temperature:
+        typeof model.temperature === "boolean" ? model.temperature : undefined,
       status: typeof model.status === "string" ? model.status : undefined,
       cost,
     });
@@ -506,6 +516,7 @@ function normalizeModelMetadataFields(
     metadata.supportsPdf === undefined &&
     metadata.reasoning === undefined &&
     metadata.reasoningOptions === undefined &&
+    metadata.temperature === undefined &&
     metadata.status === undefined &&
     metadata.cost === undefined
   ) {
