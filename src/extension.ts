@@ -277,7 +277,7 @@ interface ApiSettings {
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
   thinking: ThinkingSettings;
-  stripThinkTags: "auto" | "on" | "off";
+  stripThinkTags: "never" | "auto" | "always";
 }
 
 interface LanguageModelConfiguration {
@@ -1268,6 +1268,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           authHeaders: buildOpenCodeGatewayAuthHeaders("messages", apiKey),
           capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
           onTransportSummary,
+          stripThinkTags: settings.stripThinkTags,
         });
         return;
       }
@@ -1290,6 +1291,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           contextWindowOutputBuffer,
           capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
           onTransportSummary,
+          stripThinkTags: settings.stripThinkTags,
           onReasoningContent: (toolCallIds, reasoningContent) => {
           for (const toolCallId of toolCallIds) {
             this.reasoningContentByToolCallId.set(toolCallId, reasoningContent);
@@ -1318,6 +1320,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
           authHeaders: buildOpenCodeGatewayAuthHeaders("google", apiKey),
           capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
           onTransportSummary,
+          stripThinkTags: settings.stripThinkTags,
           onReasoningContent: (toolCallIds, reasoningContent) => {
           for (const toolCallId of toolCallIds) {
             this.reasoningContentByToolCallId.set(toolCallId, reasoningContent);
@@ -1344,6 +1347,7 @@ class OpenCodeProvider implements vscode.LanguageModelChatProvider<OpenCodeModel
         contextWindowOutputBuffer,
         capacityLimitedModelNotes: CAPACITY_LIMITED_MODEL_NOTES,
         onTransportSummary,
+        stripThinkTags: settings.stripThinkTags,
         onReasoningContent: (toolCallIds, reasoningContent) => {
           for (const toolCallId of toolCallIds) {
             this.reasoningContentByToolCallId.set(toolCallId, reasoningContent);

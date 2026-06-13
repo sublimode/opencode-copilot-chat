@@ -2,6 +2,14 @@
 
 All notable changes to the **OpenCode Go BYOK Provider** extension are documented here.
 
+## [0.2.8] — 2026-06-13
+
+### Fixed
+
+- **`[Streaming]` MiniMax M3 `<think>` tag leak — reimplementation.** The `opencodego.stripThinkTags` setting was declared in `package.json` and read from config, but the actual stripping logic was missing from the runtime code — MiniMax M3's inline `<think>...</think>` reasoning blocks leaked directly into the Copilot Chat UI. This fix introduces a new `ThinkTagFilter` class (streaming-safe state machine with partial-tag carry buffer) wired into both `OpenAiResponseExtractor` and `AnthropicResponseExtractor`, all four streaming entry points, and all text extraction paths (`delta.content`, `delta.text`, `content_block_start`, `content_block_delta`, fallback deltas). The extracted thinking content is accumulated into the existing `reasoningContent` pipeline instead of being discarded. Also fixes the `ApiSettings.stripThinkTags` type from `"auto" | "on" | "off"` to `"never" | "auto" | "always"` to match the `package.json` enum. In `"auto"` mode (default), stripping applies only to models matching `/^minimax-m/i`.
+
+---
+
 ## [0.2.7] — 2026-06-12
 
 ### Fixed

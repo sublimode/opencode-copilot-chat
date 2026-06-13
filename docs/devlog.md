@@ -1,5 +1,5 @@
 # 🧠 OPENCODE COPILOT CHAT DEVLOG
-**Branch:** `main` | **Updated:** 2026-06-13 Asia/Jakarta | **Current Phase:** v0.2.7 Released ✅ — Usage Webview Panel merged + Documentation Consistency Audit
+**Branch:** `main` | **Updated:** 2026-06-13 Asia/Jakarta | **Current Phase:** v0.2.8 — MiniMax M3 Think-Tag Leak Reimplementation ✅
 
 ---
 
@@ -8,10 +8,43 @@
 | Field | Value |
 |-------|-------|
 | **Last Session** | 2026-06-13 |
-| **Worked On** | (1) Usage Webview Panel — persistent SVG dashboard for Go Usage. (2) Documentation consistency audit — fixed 14 cross-reference mismatches, reordered devlog sections chronologically, updated folder structure docs. (3) Active docs audit (deep, 2 passes) — verified all 4 🟢 Active documents against codebase + git history + CHANGELOG, confirmed docs were backdated. **All 4** marked ✅ Solved: issue #19 (PR #15 merged), references #01 (research complete), architecture #01 (living ref complete), issue #01 (all code fixed in v0.1.9/v0.1.10, remaining loop is model behavior not code bug). 0 genuinely Active docs remain. |
-| **Stopped At** | `main` at `0.2.7`; all docs status verified against codebase + CHANGELOG; 0 Active docs remaining. Only future feature task: IMPL-01 (agents window implementation). |
-| **Next Action** | → Build VSIX and install locally for v0.2.7 testing, or implement IMPL-01 (agents window model visibility — Option A duplicate model registration). |
+| **Worked On** | MiniMax M3 `<think>` tag leak reimplementation. The `opencodego.stripThinkTags` setting existed since v0.2.2 (PR #13) but the runtime stripping logic was lost during later merge cycles. New `ThinkTagFilter` class implemented from scratch with streaming-safe state machine, wired into both extractors + all 4 stream entry points. `ApiSettings.stripThinkTags` type fixed to match `package.json` enum. Version bumped to 0.2.8. |
+| **Stopped At** | `main` at `0.2.8`; compile clean (0 errors); docs written (issue #22, CHANGELOG, devlog). |
+| **Next Action** | → Build VSIX and install locally for v0.2.8 testing, or implement IMPL-01 (agents window model visibility — Option A duplicate model registration). |
 | **Open Issues** | (1) Go Usage status bar requires non-depleted subscription to verify token recording. (2) Qwen image requests can still hit provider-side Alibaba quota depending on account/model capacity. (3) `qwen3.6-plus-free` can continue workspace tool calls instead of synthesizing final text during broad agent tasks. |
+
+---
+
+## ✅ MiniMax M3 `<think>` Tag Leak — Reimplementation — Session 2026-06-13 🟢 DONE
+
+**Action:** Re-implemented the `<think>...</think>` tag stripping feature that was lost during the v0.2.4–v0.2.7 merge/refactor cycle.
+
+**Root Cause:** The `opencodego.stripThinkTags` setting was declared in `package.json` (since v0.2.2, PR #13) and read from config in `extension.ts`, but the actual runtime stripping logic (`processThinkTagsStream`, `stripThinkTags`, etc. from PR #13) was absent from `src/streaming.ts`. Both `OpenAiResponseExtractor` and `AnthropicResponseExtractor` emitted text verbatim — including `<think>` reasoning blocks — directly to the Copilot Chat UI.
+
+**Changes:**
+
+| # | Fix | Files | Impact |
+|---|-----|-------|--------|
+| P0 | New `ThinkTagFilter` class | `src/streaming.ts` | Streaming state machine — `carry` buffer for cross-chunk tag boundaries, `insideThink` flag, `process()` + `finish()` methods |
+| P1 | `shouldStripThinkTags()` + `createThinkTagFilter()` | `src/streaming.ts` | Config resolution: `"auto"` → `/^minimax-m/i`, `"always"` → all, `"never"` → none |
+| P2 | `thinkFilter` wired into `OpenAiResponseExtractor` | `src/streaming.ts` | Constructor param + `filterText()` on both `delta` and `message` text paths |
+| P3 | `thinkFilter` wired into `AnthropicResponseExtractor` | `src/streaming.ts` | Constructor param + `filterText()` on `content_block_start`, `content_block_delta`, and fallback paths |
+| P4 | `flushReasoningFallback()` flush | Both extractors | Calls `thinkFilter.finish()` at stream end |
+| P5 | `stripThinkTags` in `StreamRequestOptions` | `src/streaming.ts` | New optional field |
+| P6 | All 4 stream entry points create filter | `src/streaming.ts` | `streamChatCompletions`, `streamAnthropicMessages`, `streamResponsesApi`, `streamGoogleGenerateContent` |
+| P7 | Thread `stripThinkTags` to all 4 calls | `src/extension.ts` | `settings.stripThinkTags` passed through |
+| P8 | Fix `ApiSettings.stripThinkTags` type | `src/extension.ts` | `"auto" \| "on" \| "off"` → `"never" \| "auto" \| "always"` |
+| D1 | Issue doc | `docs/issues/22-...` | Full root cause analysis, architecture, comparison with PR #13 |
+| D2 | CHANGELOG entry | `CHANGELOG.md` | `[0.2.8] — 2026-06-13` |
+| D3 | Version bump | `package.json` | `0.2.7` → `0.2.8` |
+
+**Verification:**
+
+```bash
+npm run compile    # 0 errors
+```
+
+**Result:** ✅ MiniMax M3's `<think>` reasoning is now stripped from visible chat output in `"auto"` mode (default). Thinking content is accumulated into `reasoningContent` instead of being discarded.
 
 ---
 
